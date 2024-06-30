@@ -8,9 +8,7 @@ import random
 from datetime import datetime
 from gemini import query_gemini
 
-# CHAT_TITLE = 'gem Chat'
 CHAT_TITLE = 'Чат Котенков и Горь'
-# CHAT_TITLE = 'Чат – Инфо инсайды'
 
 load_dotenv()
 

@@ -1,153 +1,193 @@
-import time
-import random
-from collections import defaultdict, Counter
-from typing import List, Dict
+import requests
+import logging
+from dotenv import load_dotenv
+import os
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
+from telethon import TelegramClient, events
+from telethon.tl.types import User
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+import datetime
+
+load_dotenv()
+
+# Telegram Bot API credentials
+TELEGRAM_API_ID = os.getenv("TG_API_ID")
+TELEGRAM_API_HASH = os.getenv("TG_API_HASH")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Google Gemini API key
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///telegram_messages.db")  # Default to SQLite
+engine = create_engine(DATABASE_URL)
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
+session = Session()
 
 
-# Имитация Telegram API
-class TelegramAPI:
-    def get_new_messages(self) -> List[Dict]:
-        # В реальности здесь был бы код для получения сообщений из Telegram
-        return [
-            {"author": f"user{random.randint(1, 5)}", "text": f"Message {random.randint(1, 100)}"}
-            for _ in range(random.randint(1, 10))
-        ]
+# --- Database Model ---
+class Message(Base):
+    __tablename__ = 'messages'
+    id = Column(Integer, primary_key=True)
+    message_id = Column(Integer)  # Original Telegram message ID
+    chat_id = Column(Integer)  # ID of the chat the message belongs to
+    user_id = Column(Integer)
+    username = Column(String)
+    user_tag = Column(String)
+    message_text = Column(Text)
+    reaction = Column(String)
+    reply_to_message_id = Column(Integer)
+    time_sent = Column(DateTime)
 
 
-# Имитация Gemini AI
-class GeminiAI:
-    def generate_commentary(self, context: str) -> str:
-        # В реальности здесь был бы запрос к Gemini AI
-        return f"Exciting commentary based on: {context}"
+Base.metadata.create_all(engine)
+
+# --- Google Gemini Configuration ---
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel('models/gemini-pro')
+
+# Define safety settings for Gemini
+safety_settings = {
+    'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+}
+
+# Define generation config for Gemini
+generation_config = GenerationConfig(
+    temperature=0.9,
+    top_k=40,
+    top_p=0.95,
+    max_output_tokens=1024,
+)
+
+# --- Telegram Bot Client ---
+bot = TelegramClient('telegram_bot', TELEGRAM_API_ID, TELEGRAM_API_HASH).start(bot_token=TELEGRAM_BOT_TOKEN)
 
 
-class TelegramSummarizer:
-    def __init__(self):
-        self.telegram_api = TelegramAPI()
-        self.gemini_ai = GeminiAI()
-        self.active_participants = defaultdict(lambda: {"messages": 0, "last_active": 0})
-        self.topics = defaultdict(int)
-        self.significant_events = []
-        self.last_summary_time = time.time()
-        self.messages_since_last_summary = []
-        self.sentiment_scores = []
-
-    def run(self):
-        while True:
-            # Получаем новые сообщения из Telegram
-            new_messages = self.telegram_api.get_new_messages()
-            # Анализируем полученные сообщения
-            self.analyze_messages(new_messages)
-
-            # Проверяем, нужно ли генерировать новый комментарий
-            if self.should_generate_commentary():
-                # Генерируем комментарий в спортивном стиле
-                commentary = self.generate_sports_commentary()
-                # Отправляем комментарий
-                self.send_commentary(commentary)
-                # Обновляем информацию о последней сводке
-                self.update_last_summary()
-
-            # Задержка между проверками
-            time.sleep(5)
-
-    def analyze_messages(self, messages: List[Dict]):
-        for message in messages:
-            # Обновляем информацию об активных участниках
-            self.update_active_participants(message['author'])
-            # Анализируем содержание сообщения
-            self.analyze_message_content(message['text'])
-            # Добавляем сообщение в список сообщений с момента последней сводки
-            self.messages_since_last_summary.append(message)
-            # Определяем значимые события
-            self.detect_significant_events(message)
-
-    def update_active_participants(self, author: str):
-        # Увеличиваем счетчик сообщений участника
-        self.active_participants[author]["messages"] += 1
-        # Обновляем время последней активности участника
-        self.active_participants[author]["last_active"] = time.time()
-
-    def analyze_message_content(self, text: str):
-        # Разбиваем текст на слова и обновляем счетчики тем
-        words = text.lower().split()
-        self.topics.update(words)
-        # Анализируем настроение сообщения
-        sentiment = self.analyze_sentiment(text)
-        # Добавляем результат анализа настроения в список
-        self.sentiment_scores.append(sentiment)
-
-    def analyze_sentiment(self, text: str) -> float:
-        # Упрощенный анализ настроения
-        positive_words = set(['good', 'great', 'awesome', 'nice', 'cool'])
-        negative_words = set(['bad', 'awful', 'terrible', 'sucks', 'shit'])
-        words = set(text.lower().split())
-        # Вычисляем оценку настроения
-        score = (len(words & positive_words) - len(words & negative_words)) / len(words)
-        return max(-1.0, min(1.0, score))  # Нормализуем от -1 до 1
-
-    def detect_significant_events(self, message: Dict):
-        text = message['text'].lower()
-        # Определяем эмоциональные сообщения
-        if '!' in text or '?' in text:
-            self.significant_events.append(f"Эмоциональное сообщение от {message['author']}")
-        # Определяем длинные сообщения
-        if len(text.split()) > 20:
-            self.significant_events.append(f"Длинное сообщение от {message['author']}")
-        # Определяем важные объявления
-        if any(word in text for word in ['важно', 'срочно', 'внимание']):
-            self.significant_events.append(f"Важное объявление от {message['author']}")
-
-    def should_generate_commentary(self) -> bool:
-        # Пороговые значения для генерации комментария
-        time_threshold = 300  # 5 минут
-        message_threshold = 50
-        event_threshold = 3
-        # Проверяем, нужно ли генерировать комментарий
-        return (
-                time.time() - self.last_summary_time > time_threshold or
-                len(self.messages_since_last_summary) > message_threshold or
-                len(self.significant_events) >= event_threshold
+# --- Helper Functions ---
+def query_gemini(prompt):
+    try:
+        response = model.generate_content(
+            prompt,
+            safety_settings=safety_settings,
+            generation_config=generation_config
         )
-
-    def generate_sports_commentary(self) -> str:
-        # Подготавливаем контекст для генерации комментария
-        context = self.prepare_context()
-        # Генерируем комментарий с помощью AI
-        return self.gemini_ai.generate_commentary(context)
-
-    def prepare_context(self) -> str:
-        # Определяем топ участников
-        top_participants = sorted(
-            self.active_participants.items(),
-            key=lambda x: (x[1]['messages'], -x[1]['last_active']),
-            reverse=True
-        )[:5]
-        # Определяем топ темы
-        top_topics = Counter(self.topics).most_common(5)
-        # Вычисляем среднее настроение
-        avg_sentiment = sum(self.sentiment_scores) / len(self.sentiment_scores) if self.sentiment_scores else 0
-
-        # Формируем контекст для AI
-        context = f"Топ игроки: {[p[0] for p in top_participants]}. "
-        context += f"Горячие темы: {[t[0] for t in top_topics]}. "
-        context += f"Настроение чата: {'позитивное' if avg_sentiment > 0 else 'негативное' if avg_sentiment < 0 else 'нейтральное'}. "
-        context += f"Ключевые моменты: {self.significant_events[:3]}"
-        return context
-
-    def send_commentary(self, commentary: str):
-        # Выводим комментарий (в реальности здесь был бы код для отправки комментария в Telegram)
-        print(f"Новый комментарий от спортивного обозревателя:\n{commentary}")
-
-    def update_last_summary(self):
-        # Обновляем время последней сводки
-        self.last_summary_time = time.time()
-        # Очищаем списки сообщений и значимых событий
-        self.messages_since_last_summary.clear()
-        self.significant_events.clear()
-        self.sentiment_scores.clear()
+        return response.text.strip()
+    except Exception as e:
+        logging.error(f"An error occurred while querying Gemini: {e}")
+        return "An error occurred. Please try again later."
 
 
-if __name__ == "__main__":
-    summarizer = TelegramSummarizer()
-    summarizer.run()
+def format_messages_for_gemini(messages):
+    messages_str = ""
+    for msg in messages:
+        messages_str += f"[{msg.time_sent}] {msg.username or msg.user_tag or 'Unknown'}: {msg.message_text}\n"
+    return messages_str
+
+
+# --- Telegram Bot Commands ---
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_command(event):
+    await event.respond("Hello! I'm a Telegram bot that can summarize and analyze conversations.")
+
+
+@bot.on(events.NewMessage(pattern='/summarize'))
+async def summarize_command(event):
+    # Implement logic to retrieve messages from the database based on timeframe
+    # For now, let's just get the last 10 messages:
+    messages = session.query(Message).order_by(Message.time_sent.desc()).limit(10).all()
+
+    if messages:
+        # Format the retrieved messages for Gemini input
+        formatted_messages = format_messages_for_gemini(messages)
+        prompt = f"Please provide a concise summary of the following conversation:\n\n{formatted_messages}"
+        # Query Gemini for summarization
+        summary = query_gemini(prompt)
+        await event.respond(f"Summary:\n\n{summary}")
+    else:
+        await event.respond("No messages found.")
+
+
+@bot.on(events.NewMessage(pattern='/analyze'))
+async def analyze_command(event):
+    try:
+        user_tag = event.message.text.split(" ")[1]
+        user_messages = session.query(Message).filter_by(user_tag=user_tag).order_by(Message.time_sent.desc()).limit(
+            5000).all()
+
+        if user_messages:
+            formatted_messages = format_messages_for_gemini(user_messages)
+            prompt = f"Please analyze the following messages and provide insights about the user's behavior, communication patterns, or anything noteworthy:\n\n{formatted_messages}"
+            analysis = query_gemini(prompt)
+            await event.respond(f"Analysis of {user_tag}:\n\n{analysis}")
+        else:
+            await event.respond(f"No messages found for user {user_tag}.")
+
+    except IndexError:
+        await event.respond("Please provide a user tag after the /analyze command. Example: /analyze @example_user")
+
+
+# --- Message Handling ---
+@bot.on(events.NewMessage)
+async def handle_new_message(event):
+    # Retrieve the message sender
+    sender = await event.get_sender()
+
+    # Check if the sender is a User (not a Channel, etc.)
+    if isinstance(sender, User):
+        new_message = Message(
+            message_id=event.message.id,
+            chat_id=event.chat_id,
+            user_id=sender.id,
+            username=sender.username,
+            user_tag=f'@{sender.username}' if sender.username else None,
+            message_text=event.message.text,
+            # Extract other details as needed (reaction, reply, etc.)
+            time_sent=event.message.date,
+        )
+        session.add(new_message)
+        session.commit()
+
+
+@bot.on(events.NewMessage(pattern='/ask'))
+async def ask_command(event):
+    try:
+        user_question = event.message.text[5:]  # Get text after '/ask '
+
+        if not user_question:
+            await event.respond(
+                "Please provide a question after the /ask command. Example: /ask What's the weather like today?")
+            return
+
+        # Retrieve the last 5000 messages from the database for the current chat
+        messages = session.query(Message).filter_by(chat_id=event.chat_id).order_by(Message.time_sent.desc()).limit(
+            5000).all()
+
+        if messages:
+            # Format the messages for Gemini input
+            formatted_messages = format_messages_for_gemini(messages)
+
+            # Construct the prompt for Gemini
+            prompt = f"Context:\n\n{formatted_messages}\n\nQuestion: {user_question}\n\nAnswer:"
+
+            # Query Google Gemini
+            gemini_response = query_gemini(prompt)
+
+            await event.respond(gemini_response)
+        else:
+            await event.respond("No previous messages found in this chat.")
+
+    except Exception as e:
+        logging.error(f"An error occurred while processing /ask command: {e}")
+        await event.respond("An error occurred. Please try again later.")
+
+
+# --- Start the Bot ---
+print("Bot is running...")
+bot.run_until_disconnected()
