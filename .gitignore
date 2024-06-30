@@ -1,0 +1,8 @@
+# Ignore PyCharm IDE files and directories
+.idea/
+
+# Ignore environment variables file
+.env
+
+# Ignore all Telethon session files in the root directory
+/*.session
