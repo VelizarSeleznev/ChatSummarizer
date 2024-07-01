@@ -1,50 +1,30 @@
-import requests
-import logging
-from dotenv import load_dotenv
+from telethon import TelegramClient, events
+from telethon.tl.types import InputPeerUser
+import sqlite3
+import pandas as pd
+from datetime import datetime, timedelta
+import asyncio
 import os
+from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
-from telethon import TelegramClient, events
-from telethon.tl.types import User
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-import datetime
+import logging
+import re
 
 load_dotenv()
 
-# Telegram Bot API credentials
-TELEGRAM_API_ID = os.getenv("TG_API_ID")
-TELEGRAM_API_HASH = os.getenv("TG_API_HASH")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+api_id = os.getenv("TG_API_ID")
+api_hash = os.getenv("TG_API_HASH")
+bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Google Gemini API key
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///telegram_messages.db")  # Default to SQLite
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-Session = sessionmaker(bind=engine)
-session = Session()
+# Initialize the Telethon client
+bot = TelegramClient('bot', api_id, api_hash).start(bot_token=bot_token)
 
-
-# --- Database Model ---
-class Message(Base):
-    __tablename__ = 'messages'
-    id = Column(Integer, primary_key=True)
-    message_id = Column(Integer)  # Original Telegram message ID
-    chat_id = Column(Integer)  # ID of the chat the message belongs to
-    user_id = Column(Integer)
-    username = Column(String)
-    user_tag = Column(String)
-    message_text = Column(Text)
-    reaction = Column(String)
-    reply_to_message_id = Column(Integer)
-    time_sent = Column(DateTime)
-
-
-Base.metadata.create_all(engine)
+# Connect to the SQLite database
+conn = sqlite3.connect('data.sqlite')
+cursor = conn.cursor()
 
 # --- Google Gemini Configuration ---
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -66,11 +46,7 @@ generation_config = GenerationConfig(
     max_output_tokens=1024,
 )
 
-# --- Telegram Bot Client ---
-bot = TelegramClient('telegram_bot', TELEGRAM_API_ID, TELEGRAM_API_HASH).start(bot_token=TELEGRAM_BOT_TOKEN)
 
-
-# --- Helper Functions ---
 def query_gemini(prompt):
     try:
         response = model.generate_content(
@@ -84,110 +60,93 @@ def query_gemini(prompt):
         return "An error occurred. Please try again later."
 
 
-def format_messages_for_gemini(messages):
-    messages_str = ""
-    for msg in messages:
-        messages_str += f"[{msg.time_sent}] {msg.username or msg.user_tag or 'Unknown'}: {msg.message_text}\n"
-    return messages_str
+async def get_chat_messages(date):
+    query = f"""
+    SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
+    FROM messages m
+    JOIN users u ON m.user_id = u.id
+    LEFT JOIN reactions r ON m.id = r.message_id
+    WHERE DATE(m.date) = '{date}'
+    GROUP BY m.id
+    ORDER BY m.date
+    LIMIT 5000
+    """
+
+    df = pd.read_sql_query(query, conn)
+    return df
 
 
-# --- Telegram Bot Commands ---
+async def summarize_chat(date):
+    df = await get_chat_messages(date)
+
+    if df.empty:
+        return "No messages found in the specified time range."
+
+    # Prepare the prompt for Gemini
+    prompt = f"Summarize the following chat messages from this date: {date}\n\n"
+    for _, row in df.iterrows():
+        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
+
+    # Get summary from Gemini
+    summary = query_gemini(prompt)
+    return summary
+
+
 @bot.on(events.NewMessage(pattern='/start'))
-async def start_command(event):
-    await event.respond("Hello! I'm a Telegram bot that can summarize and analyze conversations.")
+async def start(event):
+    await event.reply("Welcome! I can summarize your chat. Use /summarize <days> to get a summary.")
 
 
 @bot.on(events.NewMessage(pattern='/summarize'))
-async def summarize_command(event):
-    # Implement logic to retrieve messages from the database based on timeframe
-    # For now, let's just get the last 10 messages:
-    messages = session.query(Message).order_by(Message.time_sent.desc()).limit(10).all()
-
-    if messages:
-        # Format the retrieved messages for Gemini input
-        formatted_messages = format_messages_for_gemini(messages)
-        prompt = f"Please provide a concise summary of the following conversation:\n\n{formatted_messages}"
-        # Query Gemini for summarization
-        summary = query_gemini(prompt)
-        await event.respond(f"Summary:\n\n{summary}")
+async def summarize(event):
+    date_pattern = r'\d{4}-\d{2}-\d{2}'
+    match = re.search(date_pattern, event.message.text)
+    if match:
+        date = str(match.group())
+        print("Дата:", date)
     else:
-        await event.respond("No messages found.")
+        current_date = datetime.now()
+        date = str(current_date.year) + '-' + (
+            str(current_date.month) if current_date.month > 9 else '0' + str(current_date.month)) + '-' + (
+                   str(current_date.day) if current_date.day > 9 else '0' + str(current_date.day))
+    # try:
+    #     date = int(event.message.text.split()[1])
+    #     print(date)
+    # except (IndexError, ValueError):
+    #     current_date = datetime.now()
+    #     date = str(current_date.year) + '-' + (
+    #         str(current_date.month) if current_date.month > 9 else '0' + str(current_date.month)) + '-' + (
+    #                str(current_date.day) if current_date.day > 9 else '0' + str(current_date.day))
+
+    # print(date)
+    await event.reply("Generating summary, please wait...")
+    summary = await summarize_chat(date)
+    await event.reply(summary)
 
 
-@bot.on(events.NewMessage(pattern='/analyze'))
-async def analyze_command(event):
-    try:
-        user_tag = event.message.text.split(" ")[1]
-        user_messages = session.query(Message).filter_by(user_tag=user_tag).order_by(Message.time_sent.desc()).limit(
-            5000).all()
+@bot.on(events.NewMessage(pattern='/stats'))
+async def stats(event):
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    total_messages = cursor.fetchone()[0]
 
-        if user_messages:
-            formatted_messages = format_messages_for_gemini(user_messages)
-            prompt = f"Please analyze the following messages and provide insights about the user's behavior, communication patterns, or anything noteworthy:\n\n{formatted_messages}"
-            analysis = query_gemini(prompt)
-            await event.respond(f"Analysis of {user_tag}:\n\n{analysis}")
-        else:
-            await event.respond(f"No messages found for user {user_tag}.")
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
 
-    except IndexError:
-        await event.respond("Please provide a user tag after the /analyze command. Example: /analyze @example_user")
+    cursor.execute("SELECT COUNT(*) FROM reactions")
+    total_reactions = cursor.fetchone()[0]
 
+    stats_message = f"Chat Statistics:\n"
+    stats_message += f"Total Messages: {total_messages}\n"
+    stats_message += f"Total Users: {total_users}\n"
+    stats_message += f"Total Reactions: {total_reactions}"
 
-# --- Message Handling ---
-@bot.on(events.NewMessage)
-async def handle_new_message(event):
-    # Retrieve the message sender
-    sender = await event.get_sender()
-
-    # Check if the sender is a User (not a Channel, etc.)
-    if isinstance(sender, User):
-        new_message = Message(
-            message_id=event.message.id,
-            chat_id=event.chat_id,
-            user_id=sender.id,
-            username=sender.username,
-            user_tag=f'@{sender.username}' if sender.username else None,
-            message_text=event.message.text,
-            # Extract other details as needed (reaction, reply, etc.)
-            time_sent=event.message.date,
-        )
-        session.add(new_message)
-        session.commit()
+    await event.reply(stats_message)
 
 
-@bot.on(events.NewMessage(pattern='/ask'))
-async def ask_command(event):
-    try:
-        user_question = event.message.text[5:]  # Get text after '/ask '
-
-        if not user_question:
-            await event.respond(
-                "Please provide a question after the /ask command. Example: /ask What's the weather like today?")
-            return
-
-        # Retrieve the last 5000 messages from the database for the current chat
-        messages = session.query(Message).filter_by(chat_id=event.chat_id).order_by(Message.time_sent.desc()).limit(
-            5000).all()
-
-        if messages:
-            # Format the messages for Gemini input
-            formatted_messages = format_messages_for_gemini(messages)
-
-            # Construct the prompt for Gemini
-            prompt = f"Context:\n\n{formatted_messages}\n\nQuestion: {user_question}\n\nAnswer:"
-
-            # Query Google Gemini
-            gemini_response = query_gemini(prompt)
-
-            await event.respond(gemini_response)
-        else:
-            await event.respond("No previous messages found in this chat.")
-
-    except Exception as e:
-        logging.error(f"An error occurred while processing /ask command: {e}")
-        await event.respond("An error occurred. Please try again later.")
+async def main():
+    await bot.run_until_disconnected()
 
 
-# --- Start the Bot ---
-print("Bot is running...")
-bot.run_until_disconnected()
+if __name__ == '__main__':
+    with bot:
+        bot.loop.run_until_complete(main())
