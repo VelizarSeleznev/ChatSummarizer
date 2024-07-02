@@ -90,6 +90,58 @@ async def get_chat_messages(chat_id: int, date: str):
     return df
 
 
+async def get_last_messages(chat_id: int, limit: int = 5000):
+    db = DBManager.get_db(chat_id)
+    query = f"""
+    SELECT m.id, m.date, u.username, m.content
+    FROM messages m
+    JOIN users u ON m.user_id = u.id
+    ORDER BY m.date DESC
+    LIMIT {limit}
+    """
+
+    df = pd.read_sql_query(query, db.conn)
+    return df.sort_values('date')  # Sort by date in ascending order
+
+
+async def ask_question(chat_id: int, question: str):
+    df = await get_last_messages(chat_id)
+
+    if df.empty:
+        return "No messages found in the chat history."
+
+    # Prepare the prompt for Gemini
+    prompt = f"""Ты - ассистент, специализирующийся на анализе чатов и ответах на вопросы. У тебя есть доступ к истории сообщений чата. Твоя задача - ответить на вопрос пользователя, основываясь на информации из этих сообщений.
+
+Вопрос пользователя: {question}
+
+При ответе на вопрос, пожалуйста, учитывай следующее:
+1. Если в сообщениях нет информации для ответа на вопрос, то скажи об этом и предоставь ответ на основе твоих знаний
+2. Если вопрос касается конкретного пользователя, учитывай сообщения только от этого пользователя.
+3. Старайся давать краткие, но информативные ответы.
+4. Если нужно, можешь цитировать конкретные сообщения для подтверждения своего ответа.
+
+История сообщений:
+"""
+    for _, row in df.iterrows():
+        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
+
+    # Get answer from Gemini
+    answer = query_gemini(prompt)
+    return answer
+
+
+@client.on(events.NewMessage(pattern=r'/ask (.+)'))
+async def handle_ask(event):
+    chat_id = event.chat_id
+    question = event.pattern_match.group(1)
+
+    # await event.reply("Analyzing chat history and generating an answer, please wait...")
+
+    answer = await ask_question(chat_id, question)
+    await event.reply(answer)
+
+
 async def summarize_chat(chat_id: int, date: str):
     df = await get_chat_messages(chat_id, date)
 
@@ -97,7 +149,22 @@ async def summarize_chat(chat_id: int, date: str):
         return "No messages found in the specified time range."
 
     # Prepare the prompt for Gemini
-    prompt = f"Summarize the following chat messages from this date: {date}\n\n"
+    prompt = f"""Ты - ассистент, специализирующийся на анализе и обобщении чатов. Твоя задача - создать краткое и информативное резюме диалога на основе предоставленных сообщений. Каждое сообщение содержит следующую информацию:
+
+Текст сообщения
+Время отправки
+Имя пользователя, отправившего сообщение
+
+При создании резюме обрати внимание на следующие аспекты:
+
+Основные темы обсуждения
+Ключевые моменты или решения, принятые в ходе беседы
+Вопросы, оставшиеся без ответа или требующие дальнейшего обсуждения
+Активность участников (кто был наиболее активен, кто инициировал важные темы)
+Временные рамки беседы (когда началась и закончилась)
+
+Твое резюме должно быть кратким, но содержательным, охватывая наиболее важные моменты диалога. Старайся не упускать существенных деталей, но при этом избегай излишнего углубления в мелочи.
+После этого промпта будут предоставлены сообщения для анализа. Пожалуйста, изучи их и составь резюме согласно указанным выше критериям.\n\n"""
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
@@ -161,7 +228,7 @@ async def summarize(event):
             str(current_date.month) if current_date.month > 9 else '0' + str(current_date.month)) + '-' + (
                    str(current_date.day) if current_date.day >
                                             9 else '0' + str(current_date.day))
-    await event.reply("Generating summary, please wait...")
+    # await event.reply("Generating summary, please wait...")
     summary = await summarize_chat(chat_id, date)
     await event.reply(summary)
 
