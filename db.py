@@ -5,7 +5,7 @@ import sqlite3
 from collections import namedtuple
 from datetime import datetime
 import pytz
-from typing import Iterator
+from typing import Iterator, Dict
 
 schema = """
 CREATE table messages (
@@ -75,6 +75,17 @@ Day = namedtuple("Day", ["date", "slug", "label", "count", "page"])
 
 def _page(n, multiple):
     return math.ceil(n / multiple)
+
+
+class DBManager:
+    databases: Dict[int, 'DB'] = {}
+
+    @classmethod
+    def get_db(cls, chat_id: int, tz=None) -> 'DB':
+        if chat_id not in cls.databases:
+            dbfile = f'data_{chat_id}.sqlite'
+            cls.databases[chat_id] = DB(dbfile, tz)
+        return cls.databases[chat_id]
 
 
 class DB:
@@ -194,7 +205,7 @@ class DB:
 
         total, = cur.fetchone()
         return total
-        
+
     def get_reactions_for_message(self, message_id: int):
         cur = self.conn.cursor()
         cur.execute("""SELECT r.id, r.type, u.username
@@ -240,24 +251,24 @@ class DB:
                      m.user.id,
                      m.media.id if m.media else None)
                     )
-        
+
     def insert_reaction(self, r: Reaction):
         cur = self.conn.cursor()
         cur.execute("""INSERT INTO reactions (date, message_id, user_id, type, content)
-            VALUES(?, ?, ?, ?, ?)""", 
+            VALUES(?, ?, ?, ?, ?)""",
                     (r.date.strftime("%Y-%m-%d %H:%M:%S"),
-                     r.message_id, 
-                     r.user_id, 
-                     r.type, 
+                     r.message_id,
+                     r.user_id,
+                     r.type,
                      r.content)
-                     )
-        
+                    )
+
     def insert_custom_emoji(self, document_id, emoticon):
         cur = self.conn.cursor()
         cur.execute("""INSERT OR IGNORE INTO custom_emojis (document_id, emoticon)
             VALUES(?, ?)""", (document_id, emoticon)
-            )
-        
+                    )
+
     def commit(self):
         """Commit pending writes to the DB."""
         self.conn.commit()
@@ -301,3 +312,8 @@ class DB:
                                  tags=tags,
                                  avatar=avatar),
                        media=md)
+
+    def close(self):
+        """Close the database connection."""
+        if self.conn:
+            self.conn.close()

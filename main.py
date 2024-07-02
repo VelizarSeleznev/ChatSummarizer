@@ -13,7 +13,7 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
 
-from db import DB, User, Message as DBMessage, Reaction, Media
+from db import DBManager, User, Message as DBMessage, Reaction, Media
 
 # Настройте логирование
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +31,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DB_PATH = 'data.sqlite'
 
 # Инициализация базы данных
-db = DB(DB_PATH)
+# db = DB(DB_PATH)
 
 # Создание экземпляра клиента Telegram
 client = TelegramClient('bot_session', API_ID, API_HASH).start(
@@ -73,7 +73,8 @@ def query_gemini(prompt):
         return "An error occurred. Please try again later."
 
 
-async def get_chat_messages(date):
+async def get_chat_messages(chat_id: int, date: str):
+    db = DBManager.get_db(chat_id)
     query = f"""
     SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
     FROM messages m
@@ -85,12 +86,12 @@ async def get_chat_messages(date):
     LIMIT 5000
     """
 
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query(query, db.conn)
     return df
 
 
-async def summarize_chat(date):
-    df = await get_chat_messages(date)
+async def summarize_chat(chat_id: int, date: str):
+    df = await get_chat_messages(chat_id, date)
 
     if df.empty:
         return "No messages found in the specified time range."
@@ -111,9 +112,12 @@ async def summarize_chat(date):
 async def handler(event: events.NewMessage.Event):
     """Обработчик новых сообщений."""
     message: Message = event.message
+    chat_id = event.chat_id
+
+    db = DBManager.get_db(chat_id)
 
     # Получите информацию о пользователе
-    user = await _get_user(message.sender_id)
+    user = await _get_user(message.sender_id, chat_id)
 
     # Обработайте медиа-файлы (если есть)
     media = await _process_media(message)
@@ -135,7 +139,7 @@ async def handler(event: events.NewMessage.Event):
     db.commit()
 
     # Обработайте реакции на сообщение
-    await _process_reactions(message)
+    await _process_reactions(message, chat_id)
 
 
 @client.on(events.NewMessage(pattern='/start'))
@@ -145,6 +149,7 @@ async def start(event):
 
 @client.on(events.NewMessage(pattern='/summarize'))
 async def summarize(event):
+    chat_id = event.chat_id
     date_pattern = r'\d{4}-\d{2}-\d{2}'
     match = re.search(date_pattern, event.message.text)
     if match:
@@ -157,12 +162,16 @@ async def summarize(event):
                    str(current_date.day) if current_date.day >
                                             9 else '0' + str(current_date.day))
     await event.reply("Generating summary, please wait...")
-    summary = await summarize_chat(date)
+    summary = await summarize_chat(chat_id, date)
     await event.reply(summary)
 
 
 @client.on(events.NewMessage(pattern='/stats'))
 async def stats(event):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+
+    cursor = db.conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM messages")
     total_messages = cursor.fetchone()[0]
 
@@ -180,8 +189,9 @@ async def stats(event):
     await event.reply(stats_message)
 
 
-async def _get_user(user_id: int) -> User:
+async def _get_user(user_id: int, chat_id: int) -> User:
     """Получите информацию о пользователе из Telegram и сохраните ее в базе данных."""
+    db = DBManager.get_db(chat_id)
     try:
         user = await client.get_entity(user_id)
         db_user = User(
@@ -210,8 +220,9 @@ async def _process_media(message: Message) -> Media:
     return None
 
 
-async def _process_reactions(message: Message) -> None:
+async def _process_reactions(message: Message, chat_id: int) -> None:
     """Обработайте реакции на сообщение."""
+    db = DBManager.get_db(chat_id)
     if message.reactions is not None and message.reactions.results:
         try:
             # Используем стандартную функцию GetMessageReactionsRequest
@@ -223,7 +234,7 @@ async def _process_reactions(message: Message) -> None:
 
             for reaction in reactions.reactions:
                 try:
-                    user = await _get_user(reaction.peer_id.user_id)
+                    user = await _get_user(reaction.peer_id.user_id, chat_id)
                     reaction_type = ""
                     reaction_content = ""
                     if reaction.reaction.emoticon:
