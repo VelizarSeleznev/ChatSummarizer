@@ -4,6 +4,10 @@ import os
 import sqlite3
 import re
 
+import io
+import matplotlib.pyplot as plt
+from telethon.tl.types import InputPeerUser
+
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, InputPeerUser
 from datetime import datetime, timedelta
@@ -14,6 +18,8 @@ from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
 
 from db import DBManager, User, Message as DBMessage, Reaction, Media
+from plotting_scripts import messages_by_day, activity_by_hour, message_length_distribution, user_activity_comparison, \
+    word_trend
 
 # Настройте логирование
 logging.basicConfig(level=logging.INFO)
@@ -51,10 +57,10 @@ safety_settings = {
 
 # Define generation config for Gemini
 generation_config = GenerationConfig(
-    temperature=0.9,
+    temperature=0.1,
     top_k=40,
-    top_p=0.95,
-    max_output_tokens=1024,
+    # top_p=0.95,
+    # max_output_tokens=1024,
 )
 conn = sqlite3.connect('data.sqlite')
 cursor = conn.cursor()
@@ -129,6 +135,31 @@ async def ask_question(chat_id: int, question: str):
     # Get answer from Gemini
     answer = query_gemini(prompt)
     return answer
+
+
+@client.on(events.NewMessage(pattern='/messages_by_day'))
+async def _messages_by_day(event):
+    await messages_by_day(event, client)
+
+
+@client.on(events.NewMessage(pattern='/activity_by_hour'))
+async def _activity_by_hour(event):
+    await activity_by_hour(event, client)
+
+
+@client.on(events.NewMessage(pattern='/message_length'))
+async def _message_length_distribution(event):
+    await message_length_distribution(event, client)
+
+
+@client.on(events.NewMessage(pattern='/user_activity'))
+async def _user_activity_comparison(event):
+    await user_activity_comparison(event, client)
+
+
+@client.on(events.NewMessage(pattern='/word_trend'))
+async def _word_trend(event):
+    await word_trend(event, client)
 
 
 @client.on(events.NewMessage(pattern=r'/ask (.+)'))
