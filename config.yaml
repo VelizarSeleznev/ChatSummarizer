@@ -1,0 +1,16 @@
+api_id: "YOUR_API_ID"
+api_hash: "YOUR_API_HASH"
+group: "-1001778093200" # Чат Сиолошной (чат Котенков и Горь)
+download_avatars: true
+avatar_size: [64, 64]
+download_media: false
+media_dir: "media"
+media_mime_types: []
+proxy:
+  enable: false
+fetch_batch_size: 200
+fetch_wait: 5
+fetch_limit: 0
+sync_reactions: true
+download_custom_emojis: true
+timezone: "UTC"
