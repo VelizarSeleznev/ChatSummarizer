@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
+import ast
+
+import requests  # сделано больше для того, чтобы использовать другие функции запроса к ллм
 
 from db import DBManager, User, Message as DBMessage, Reaction, Media
 from plotting_scripts import messages_by_day, activity_by_hour, message_length_distribution, user_activity_comparison, \
@@ -66,6 +69,24 @@ conn = sqlite3.connect('data.sqlite')
 cursor = conn.cursor()
 
 
+def load_prompts(filepath='prompts.txt'):
+    prompts = {}
+    current_key = None
+    with open(filepath, 'r', encoding='utf-8') as file:
+        for line in file:
+            line = line.strip()
+            if line.startswith('[') and line.endswith(']'):
+                current_key = line[1:-1]
+                prompts[current_key] = ""
+            elif current_key:
+                prompts[current_key] += line + "\n"
+    return prompts
+
+
+prompts = load_prompts()
+
+
+# Existing query_gemini function (as a fallback)
 def query_gemini(prompt):
     try:
         response = model.generate_content(
@@ -77,6 +98,68 @@ def query_gemini(prompt):
     except Exception as e:
         logging.error(f"An error occurred while querying Gemini: {e}")
         return "An error occurred. Please try again later."
+
+
+# Dictionary to store users who are in the process of updating query_gemini
+updating_users = {}
+
+
+@client.on(events.NewMessage(pattern='/update_query_gemini'))
+async def handle_update_query_gemini(event):
+    sender = await event.get_sender()
+    updating_users[sender.id] = True
+    await event.reply("Please send a .txt file containing the new query_gemini function code.")
+
+
+@client.on(events.NewMessage(func=lambda e: e.document))
+async def handle_document(event):
+    sender = await event.get_sender()
+    if sender.id not in updating_users:
+        return
+
+    if not event.document.attributes[-1].file_name.endswith('.txt'):
+        await event.reply("Please send a .txt file.")
+        return
+
+    try:
+        content = await client.download_media(event.document, file=bytes)
+        new_code = content.decode('utf-8')
+        await update_query_gemini(event, new_code)
+    except Exception as e:
+        await event.reply(f"Error processing the file: {e}")
+    finally:
+        del updating_users[sender.id]
+
+
+async def update_query_gemini(event, new_code):
+    # Validate the code structure
+    try:
+        ast.parse(new_code)
+    except SyntaxError as e:
+        await event.reply(f"Syntax error in the provided code: {e}")
+        return
+
+    # Create a temporary function to test the new code
+    try:
+        exec(new_code)
+        temp_query_gemini = locals()['query_gemini']
+    except Exception as e:
+        await event.reply(f"Error in creating the function: {e}")
+        return
+
+    # Test the new function
+    try:
+        result = temp_query_gemini("Test prompt")
+        if not isinstance(result, str):
+            raise ValueError("Function must return a string")
+    except Exception as e:
+        await event.reply(f"Error in testing the new function: {e}")
+        return
+
+    # If all checks pass, update the global query_gemini function
+    global query_gemini
+    query_gemini = temp_query_gemini
+    await event.reply("query_gemini function has been successfully updated!")
 
 
 async def get_chat_messages(chat_id: int, date: str):
@@ -117,18 +200,8 @@ async def ask_question(chat_id: int, question: str):
         return "No messages found in the chat history."
 
     # Prepare the prompt for Gemini
-    prompt = f"""Ты - ассистент, специализирующийся на анализе чатов и ответах на вопросы. У тебя есть доступ к истории сообщений чата. Твоя задача - ответить на вопрос пользователя, основываясь на информации из этих сообщений.
+    prompt = prompts['ASK_PROMPT'].format(question=question)
 
-Вопрос пользователя: {question}
-
-При ответе на вопрос, пожалуйста, учитывай следующее:
-1. Если в сообщениях нет информации для ответа на вопрос, то скажи об этом и предоставь ответ на основе твоих знаний
-2. Если вопрос касается конкретного пользователя, учитывай сообщения только от этого пользователя.
-3. Старайся давать краткие, но информативные ответы.
-4. Если нужно, можешь цитировать конкретные сообщения для подтверждения своего ответа.
-
-История сообщений:
-"""
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
@@ -180,26 +253,10 @@ async def summarize_chat(chat_id: int, date: str):
         return "No messages found in the specified time range."
 
     # Prepare the prompt for Gemini
-    prompt = f"""Ты - ассистент, специализирующийся на анализе и обобщении чатов. Твоя задача - создать краткое и информативное резюме диалога на основе предоставленных сообщений. Каждое сообщение содержит следующую информацию:
+    prompt = prompts['SUMMARIZE_PROMPT']
 
-Текст сообщения
-Время отправки
-Имя пользователя, отправившего сообщение
-
-При создании резюме обрати внимание на следующие аспекты:
-
-Основные темы обсуждения
-Ключевые моменты или решения, принятые в ходе беседы
-Вопросы, оставшиеся без ответа или требующие дальнейшего обсуждения
-Активность участников (кто был наиболее активен, кто инициировал важные темы)
-Временные рамки беседы (когда началась и закончилась)
-
-Твое резюме должно быть кратким, но содержательным, охватывая наиболее важные моменты диалога. Старайся не упускать существенных деталей, но при этом избегай излишнего углубления в мелочи.
-После этого промпта будут предоставлены сообщения для анализа. Пожалуйста, изучи их и составь резюме согласно указанным выше критериям.\n\n"""
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
-
-    print(prompt)
 
     # Get summary from Gemini
     summary = query_gemini(prompt)
@@ -249,19 +306,52 @@ async def start(event):
 async def summarize(event):
     chat_id = event.chat_id
     date_pattern = r'\d{4}-\d{2}-\d{2}'
-    match = re.search(date_pattern, event.message.text)
-    if match:
-        date = str(match.group())
-        print("Дата:", date)
+    dates = re.findall(date_pattern, event.message.text)
+
+    if len(dates) == 2:
+        start_date = dates[0]
+        end_date = dates[1]
+    elif len(dates) == 1:
+        start_date = dates[0]
+        end_date = dates[0]
     else:
-        current_date = datetime.now()
-        date = str(current_date.year) + '-' + (
-            str(current_date.month) if current_date.month > 9 else '0' + str(current_date.month)) + '-' + (
-                   str(current_date.day) if current_date.day >
-                                            9 else '0' + str(current_date.day))
-    # await event.reply("Generating summary, please wait...")
-    summary = await summarize_chat(chat_id, date)
+        current_date = datetime.now().date()
+        start_date = current_date
+        end_date = current_date
+
+    # Get chat messages within the specified date range
+    df = await get_chat_messages_between_dates(chat_id, start_date, end_date)
+
+    if df.empty:
+        await event.reply("No messages found in the specified time range.")
+        return
+
+    # Prepare the prompt for Gemini
+    prompt = prompts['SUMMARIZE_PROMPT']
+
+    for _, row in df.iterrows():
+        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
+
+    # Get summary from Gemini
+    summary = query_gemini(prompt)
     await event.reply(summary)
+
+
+async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str):
+    db = DBManager.get_db(chat_id)
+    query = f"""
+    SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
+    FROM messages m
+    JOIN users u ON m.user_id = u.id
+    LEFT JOIN reactions r ON m.id = r.message_id
+    WHERE DATE(m.date) BETWEEN '{start_date}' AND '{end_date}'
+    GROUP BY m.id
+    ORDER BY m.date
+    LIMIT 5000
+    """
+
+    df = pd.read_sql_query(query, db.conn)
+    return df
 
 
 @client.on(events.NewMessage(pattern='/stats'))
