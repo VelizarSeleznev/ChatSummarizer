@@ -86,8 +86,7 @@ def load_prompts(filepath='prompts.txt'):
 prompts = load_prompts()
 
 
-# Existing query_gemini function (as a fallback)
-def query_gemini(prompt):
+def default_query_llm(prompt):
     try:
         response = model.generate_content(
             prompt,
@@ -96,19 +95,23 @@ def query_gemini(prompt):
         )
         return response.text.strip()
     except Exception as e:
-        logging.error(f"An error occurred while querying Gemini: {e}")
+        logging.error(f"An error occurred while querying the LLM: {e}")
         return "An error occurred. Please try again later."
 
 
 # Dictionary to store users who are in the process of updating query_gemini
 updating_users = {}
 
+# Dictionary to store chat-specific query_llm functions
+chat_query_llm = {}
 
-@client.on(events.NewMessage(pattern='/update_query_gemini'))
-async def handle_update_query_gemini(event):
+
+@client.on(events.NewMessage(pattern='/update_query_llm'))
+async def handle_update_query_llm(event):
     sender = await event.get_sender()
-    updating_users[sender.id] = True
-    await event.reply("Please send a .txt file containing the new query_gemini function code.")
+    chat_id = event.chat_id
+    updating_users[sender.id] = chat_id
+    await event.reply("Please send a .txt file containing the new query_llm function code.")
 
 
 @client.on(events.NewMessage(func=lambda e: e.document))
@@ -117,6 +120,8 @@ async def handle_document(event):
     if sender.id not in updating_users:
         return
 
+    chat_id = updating_users[sender.id]
+
     if not event.document.attributes[-1].file_name.endswith('.txt'):
         await event.reply("Please send a .txt file.")
         return
@@ -124,14 +129,14 @@ async def handle_document(event):
     try:
         content = await client.download_media(event.document, file=bytes)
         new_code = content.decode('utf-8')
-        await update_query_gemini(event, new_code)
+        await update_query_llm(event, new_code, chat_id)
     except Exception as e:
         await event.reply(f"Error processing the file: {e}")
     finally:
         del updating_users[sender.id]
 
 
-async def update_query_gemini(event, new_code):
+async def update_query_llm(event, new_code, chat_id):
     # Validate the code structure
     try:
         ast.parse(new_code)
@@ -142,24 +147,27 @@ async def update_query_gemini(event, new_code):
     # Create a temporary function to test the new code
     try:
         exec(new_code)
-        temp_query_gemini = locals()['query_gemini']
+        temp_query_llm = locals()['query_llm']
     except Exception as e:
         await event.reply(f"Error in creating the function: {e}")
         return
 
     # Test the new function
     try:
-        result = temp_query_gemini("Test prompt")
+        result = temp_query_llm("Test prompt")
         if not isinstance(result, str):
             raise ValueError("Function must return a string")
     except Exception as e:
         await event.reply(f"Error in testing the new function: {e}")
         return
 
-    # If all checks pass, update the global query_gemini function
-    global query_gemini
-    query_gemini = temp_query_gemini
-    await event.reply("query_gemini function has been successfully updated!")
+    # If all checks pass, update the chat-specific query_llm function
+    chat_query_llm[chat_id] = temp_query_llm
+    await event.reply("query_llm function has been successfully updated for this chat!")
+
+
+async def get_query_llm(chat_id):
+    return chat_query_llm.get(chat_id, default_query_llm)
 
 
 async def get_chat_messages(chat_id: int, date: str):
@@ -199,14 +207,15 @@ async def ask_question(chat_id: int, question: str):
     if df.empty:
         return "No messages found in the chat history."
 
-    # Prepare the prompt for Gemini
+    # Prepare the prompt for the LLM
     prompt = prompts['ASK_PROMPT'].format(question=question)
 
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
-    # Get answer from Gemini
-    answer = query_gemini(prompt)
+    # Get answer from the chat-specific LLM function
+    query_llm = await get_query_llm(chat_id)
+    answer = query_llm(prompt)
     return answer
 
 
@@ -240,27 +249,8 @@ async def handle_ask(event):
     chat_id = event.chat_id
     question = event.pattern_match.group(1)
 
-    # await event.reply("Analyzing chat history and generating an answer, please wait...")
-
     answer = await ask_question(chat_id, question)
     await event.reply(answer)
-
-
-async def summarize_chat(chat_id: int, date: str):
-    df = await get_chat_messages(chat_id, date)
-
-    if df.empty:
-        return "No messages found in the specified time range."
-
-    # Prepare the prompt for Gemini
-    prompt = prompts['SUMMARIZE_PROMPT']
-
-    for _, row in df.iterrows():
-        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
-
-    # Get summary from Gemini
-    summary = query_gemini(prompt)
-    return summary
 
 
 @client.on(events.NewMessage)
@@ -333,7 +323,9 @@ async def summarize(event):
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
     # Get summary from Gemini
-    summary = query_gemini(prompt)
+    # summary = query_gemini(prompt)
+    query_llm = await get_query_llm(chat_id)
+    summary = query_llm(prompt)
     await event.reply(summary)
 
 
