@@ -10,6 +10,7 @@ from telethon.tl.types import InputPeerUser
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, InputPeerUser
+from telethon import events, Button
 from datetime import datetime, timedelta
 import pandas as pd
 from dotenv import load_dotenv
@@ -39,6 +40,24 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # Directory to store chat-specific LLM functions
 CHAT_FUNCTIONS_DIR = 'chat_functions'
+
+# Directory to store chat-specific prompts
+CHAT_PROMPTS_DIR = 'chat_prompts'
+os.makedirs(CHAT_PROMPTS_DIR, exist_ok=True)
+
+# Directory to store chat-specific limits
+CHAT_LIMITS_DIR = 'chat_limits'
+os.makedirs(CHAT_LIMITS_DIR, exist_ok=True)
+
+# Default limits
+DEFAULT_LIMITS = {
+    'summarize_limit': 5000,
+    'ask_limit': 5000,
+    'last_messages_limit': 5000
+}
+
+# Add this global variable to store users in ongoing dialogues
+ongoing_dialogues = set()
 
 # Ensure the directory exists
 os.makedirs(CHAT_FUNCTIONS_DIR, exist_ok=True)
@@ -115,6 +134,42 @@ def get_chat_functions_file(chat_id):
     return os.path.join(CHAT_FUNCTIONS_DIR, f'{chat_id}_functions.json')
 
 
+def get_chat_prompts_file(chat_id):
+    return os.path.join(CHAT_PROMPTS_DIR, f'{chat_id}_prompts.json')
+
+
+def get_chat_limits_file(chat_id):
+    return os.path.join(CHAT_LIMITS_DIR, f'{chat_id}_limits.json')
+
+
+def load_chat_prompts(chat_id):
+    file_path = get_chat_prompts_file(chat_id)
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return prompts  # Return default prompts if no custom prompts exist
+
+
+def save_chat_prompts(chat_id, new_prompts):
+    file_path = get_chat_prompts_file(chat_id)
+    with open(file_path, 'w') as f:
+        json.dump(new_prompts, f)
+
+
+def load_chat_limits(chat_id):
+    file_path = get_chat_limits_file(chat_id)
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return DEFAULT_LIMITS
+
+
+def save_chat_limits(chat_id, new_limits):
+    file_path = get_chat_limits_file(chat_id)
+    with open(file_path, 'w') as f:
+        json.dump(new_limits, f)
+
+
 def load_chat_functions(chat_id):
     file_path = get_chat_functions_file(chat_id)
     if os.path.exists(file_path):
@@ -129,9 +184,153 @@ def save_chat_functions(chat_id, functions):
         json.dump(functions, f)
 
 
+@client.on(events.NewMessage(pattern='/update_prompt'))
+async def handle_update_prompt(event):
+    sender = await event.get_sender()
+    chat_id = event.chat_id
+    ongoing_dialogues.add(sender.id)
+    await event.reply("Введите имя промпта, который вы хотите обновить (например, 'ASK_PROMPT', 'SUMMARIZE_PROMPT'):")
+    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'prompt_naming'}
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'prompt_naming'))
+async def handle_prompt_name(event):
+    sender = await event.get_sender()
+    if sender.id not in ongoing_dialogues:
+        return
+    chat_id = updating_users[sender.id]['chat_id']
+    prompt_name = event.message.text.strip().upper()
+
+    if prompt_name == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
+
+    if prompt_name == '/UPDATE_PROMPT':
+        return
+
+    chat_prompts = load_chat_prompts(chat_id)
+    if prompt_name not in chat_prompts:
+        await event.reply(f"Промпт '{prompt_name}' не найден. Пожалуйста, выберите правильное имя промпта.")
+        return
+
+    updating_users[sender.id]['prompt_name'] = prompt_name
+    updating_users[sender.id]['state'] = 'waiting_for_prompt'
+    await event.reply(f"Пожалуйста, пришлите новое содержимое для промпта '{prompt_name}'.")
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'waiting_for_prompt'))
+async def handle_new_prompt(event):
+    sender = await event.get_sender()
+    if sender.id not in ongoing_dialogues:
+        return
+    if event.message.text in ['ASK_PROMPT', 'SUMMARIZE_PROMPT']:
+        return
+    if event.message.text == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
+    chat_id = updating_users[sender.id]['chat_id']
+    prompt_name = updating_users[sender.id]['prompt_name']
+    new_prompt = event.message.text
+
+    chat_prompts = load_chat_prompts(chat_id)
+    chat_prompts[prompt_name] = new_prompt
+    save_chat_prompts(chat_id, chat_prompts)
+
+    await event.reply(f"Промпт '{prompt_name}' был успешно обновлен для этого чата.")
+    ongoing_dialogues.remove(sender.id)
+    del updating_users[sender.id]
+
+
+@client.on(events.NewMessage(pattern='/update_limit'))
+async def handle_update_limit(event):
+    sender = await event.get_sender()
+    chat_id = event.chat_id
+    await event.reply(
+        "Введите имя лимита, который вы хотите обновить (например, 'summarize_limit', 'ask_limit', 'last_messages_limit'):")
+    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'limit_naming'}
+    ongoing_dialogues.add(sender.id)
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'limit_naming'))
+async def handle_limit_name(event):
+    sender = await event.get_sender()
+    chat_id = updating_users[sender.id]['chat_id']
+    limit_name = event.message.text.strip().lower()
+
+    if limit_name == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
+
+    if limit_name == '/update_limit':
+        return
+
+    chat_limits = load_chat_limits(chat_id)
+    if limit_name not in chat_limits:
+        await event.reply(f"Лимит '{limit_name}' не найден. Пожалуйста, выберите правильное имя лимита.")
+        return
+
+    updating_users[sender.id]['limit_name'] = limit_name
+    updating_users[sender.id]['state'] = 'waiting_for_limit'
+    await event.reply(
+        f"Пожалуйста, пришлите новое значение для лимита '{limit_name}' (должно быть целое положительное число).")
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'waiting_for_limit'))
+async def handle_new_limit(event):
+    sender = await event.get_sender()
+    if sender.id not in ongoing_dialogues:
+        return
+    if event.message.text == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
+    chat_id = updating_users[sender.id]['chat_id']
+    limit_name = updating_users[sender.id]['limit_name']
+
+    try:
+        new_limit = int(event.message.text)
+        if new_limit <= 0:
+            raise ValueError
+    except ValueError:
+        await event.reply("Неверный ввод. Пожалуйста, введите целое положительное число.")
+        return
+
+    chat_limits = load_chat_limits(chat_id)
+    chat_limits[limit_name] = new_limit
+    save_chat_limits(chat_id, chat_limits)
+
+    await event.reply(f"Лимит '{limit_name}' был успешно обновлен до {new_limit} для этого чата.")
+    ongoing_dialogues.remove(sender.id)
+    del updating_users[sender.id]
+
+
+@client.on(events.NewMessage(pattern='/cancel'))
+async def cancel_dialogue(event):
+    sender_id = event.sender_id
+    if sender_id in ongoing_dialogues:
+        ongoing_dialogues.remove(sender_id)
+        if sender_id in updating_users:
+            del updating_users[sender_id]
+        # await event.reply("Current operation has been cancelled.")
+    # else:
+        # await event.reply("There's no ongoing operation to cancel.")
+
+
 @client.on(events.NewMessage(pattern='/update_query_llm'))
 async def handle_update_query_llm(event):
     sender = await event.get_sender()
+    ongoing_dialogues.add(sender.id)
     chat_id = event.chat_id
     await event.reply("Пожалуйста, введите имя для новой функции (не может быть 'default'):")
     updating_users[sender.id] = {'chat_id': chat_id, 'state': 'naming'}
@@ -144,7 +343,15 @@ async def handle_function_name(event):
     chat_id = updating_users[sender.id]['chat_id']
     name = event.message.text.strip()
 
+    if sender.id not in ongoing_dialogues:
+        return
+
     if name == '/update_query_llm':
+        return
+    if name == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
         return
 
     if name.lower() == 'default':
@@ -166,8 +373,16 @@ async def handle_function_name(event):
         'state'] == 'waiting_for_file'))
 async def handle_document(event):
     sender = await event.get_sender()
+    if sender.id not in ongoing_dialogues:
+        return
     chat_id = updating_users[sender.id]['chat_id']
     name = updating_users[sender.id]['name']
+
+    if event.message.text == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
 
     if not event.document.attributes[-1].file_name.endswith('.txt'):
         await event.reply("Пожалуйста, отправьте .txt файл.")
@@ -181,6 +396,7 @@ async def handle_document(event):
         await event.reply(f"Ошибка при обработке файла: {e}")
     finally:
         del updating_users[sender.id]
+        ongoing_dialogues.remove(sender.id)
 
 
 async def update_query_llm(event, new_code, chat_id, name):
@@ -223,6 +439,8 @@ async def list_functions(event):
 
 @client.on(events.NewMessage(pattern='/set_function'))
 async def set_function(event):
+    sender = await event.get_sender()
+    ongoing_dialogues.add(sender.id)
     chat_id = event.chat_id
     chat_functions = load_chat_functions(chat_id)
     function_list = "Выберите функцию для использования:\n0. default (встроенная)\n" + "\n".join(
@@ -233,7 +451,7 @@ async def set_function(event):
 
 async def change_active_function(chat_id, function_name):
     chat_functions = load_chat_functions(chat_id)
-    if function_name == 'default' or function_name in chat_functions:
+    if function_name == 'default' or function_name in chat_functions and function_name != 'current_function':
         with open(get_chat_functions_file(chat_id), 'r+') as f:
             data = json.load(f)
             data['current_function'] = function_name
@@ -250,6 +468,13 @@ async def handle_function_selection(event):
     sender = await event.get_sender()
     chat_id = updating_users[sender.id]['chat_id']
     chat_functions = load_chat_functions(chat_id)
+    if sender.id not in ongoing_dialogues:
+        return
+    if event.message.text == '/cancel':
+        ongoing_dialogues.remove(sender.id)
+        del updating_users[sender.id]
+        await event.reply("Действие отменено.")
+        return
     if event.message.text == '/set_function':
         return
     try:
@@ -267,6 +492,7 @@ async def handle_function_selection(event):
         await event.reply("Неверный выбор. Пожалуйста, попробуйте еще раз.")
     finally:
         del updating_users[sender.id]
+        ongoing_dialogues.remove(sender.id)
 
 
 async def get_query_llm(chat_id):
@@ -303,14 +529,15 @@ async def get_chat_messages(chat_id: int, date: str):
     return df
 
 
-async def get_last_messages(chat_id: int, limit: int = 5000):
+async def get_last_messages(chat_id: int, limit: int):
     db = DBManager.get_db(chat_id)
+    chat_limits = load_chat_limits(chat_id)
     query = f"""
     SELECT m.id, m.date, u.username, m.content
     FROM messages m
     JOIN users u ON m.user_id = u.id
     ORDER BY m.date DESC
-    LIMIT {limit}
+    LIMIT {chat_limits['last_messages_limit']}
     """
 
     df = pd.read_sql_query(query, db.conn)
@@ -318,17 +545,20 @@ async def get_last_messages(chat_id: int, limit: int = 5000):
 
 
 async def ask_question(chat_id: int, question: str):
-    df = await get_last_messages(chat_id)
+    chat_prompts = load_chat_prompts(chat_id)
+    chat_limits = load_chat_limits(chat_id)
+    df = await get_last_messages(chat_id, chat_limits['ask_limit'])
 
     if df.empty:
-        return "В истории чата не найдено сообщений."
+        return "В истории чата не найдено ни одного сообщения."
 
-    prompt = prompts['ASK_PROMPT'].format(question=question)
+    prompt = chat_prompts['ASK_PROMPT'].format(question=question)
 
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
     query_llm = await get_query_llm(chat_id)
+    print(prompt)
     answer = query_llm(prompt)
     return answer
 
@@ -433,9 +663,49 @@ async def update_query_llm_help(event):
     await event.reply(help_message)
 
 
+@client.on(events.NewMessage(pattern='/update_prompt --help'))
+async def update_prompt_help(event):
+    help_message = help_texts['UPDATE_PROMPT_HELP']
+    await event.reply(help_message)
+
+
+@client.on(events.NewMessage(pattern='/update_limit --help'))
+async def update_limit_help(event):
+    help_message = help_texts['UPDATE_LIMIT_HELP']
+    await event.reply(help_message)
+
+
+@client.on(events.NewMessage(pattern='/list_prompts'))
+async def list_prompts(event):
+    chat_id = event.chat_id
+    chat_prompts = load_chat_prompts(chat_id)
+    prompts_list = "\n".join(f"- {name}" for name in chat_prompts.keys())
+    message = f"""Available prompts for this chat:
+
+{prompts_list}
+
+Use /update_prompt to modify a prompt."""
+    await event.reply(message)
+
+
+@client.on(events.NewMessage(pattern='/list_limits'))
+async def list_limits(event):
+    chat_id = event.chat_id
+    chat_limits = load_chat_limits(chat_id)
+    limits_list = "\n".join(f"- {name}: {value}" for name, value in chat_limits.items())
+    message = f"""Current message load limits for this chat:
+
+{limits_list}
+
+Use /update_limit to modify a limit."""
+    await event.reply(message)
+
+
 @client.on(events.NewMessage(pattern='/summarize'))
 async def summarize(event):
     chat_id = event.chat_id
+    chat_prompts = load_chat_prompts(chat_id)
+    chat_limits = load_chat_limits(chat_id)
     date_pattern = r'\d{4}-\d{2}-\d{2}'
     dates = re.findall(date_pattern, event.message.text)
 
@@ -443,34 +713,29 @@ async def summarize(event):
         start_date = dates[0]
         end_date = dates[1]
     elif len(dates) == 1:
-        start_date = dates[0]
-        end_date = dates[0]
+        start_date = end_date = dates[0]
     else:
         current_date = datetime.now().date()
-        start_date = current_date
-        end_date = current_date
+        start_date = end_date = current_date
 
-    # Get chat messages within the specified date range
-    df = await get_chat_messages_between_dates(chat_id, start_date, end_date)
+    df = await get_chat_messages_between_dates(chat_id, start_date, end_date, chat_limits['summarize_limit'])
 
     if df.empty:
-        await event.reply("No messages found in the specified time range.")
+        await event.reply("Не найдено ни одного сообщения в указанном диапазоне времени.")
         return
 
-    # Prepare the prompt for Gemini
-    prompt = prompts['SUMMARIZE_PROMPT']
+    prompt = chat_prompts['SUMMARIZE_PROMPT']
 
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
-    # Get summary from Gemini
-    # summary = query_gemini(prompt)
     query_llm = await get_query_llm(chat_id)
     summary = query_llm(prompt)
+    print(prompt)
     await event.reply(summary)
 
 
-async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str):
+async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str, limit: int):
     db = DBManager.get_db(chat_id)
     query = f"""
     SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
@@ -480,7 +745,7 @@ async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_dat
     WHERE DATE(m.date) BETWEEN '{start_date}' AND '{end_date}'
     GROUP BY m.id
     ORDER BY m.date
-    LIMIT 5000
+    LIMIT {limit}
     """
 
     df = pd.read_sql_query(query, db.conn)
