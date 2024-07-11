@@ -17,6 +17,7 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
 import ast
+import json
 
 import requests  # сделано больше для того, чтобы использовать другие функции запроса к ллм
 
@@ -36,11 +37,20 @@ API_HASH = os.getenv('TG_API_HASH')
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# Directory to store chat-specific LLM functions
+CHAT_FUNCTIONS_DIR = 'chat_functions'
+
+# Ensure the directory exists
+os.makedirs(CHAT_FUNCTIONS_DIR, exist_ok=True)
+
+# Dictionary to store users who are in the process of updating query_gemini
+updating_users = {}
+
+# Dictionary to store chat-specific query_llm functions
+chat_query_llm = {}
+
 # Путь к базе данных SQLite
 DB_PATH = 'data.sqlite'
-
-# Инициализация базы данных
-# db = DB(DB_PATH)
 
 # Создание экземпляра клиента Telegram
 client = TelegramClient('bot_session', API_ID, API_HASH).start(
@@ -69,7 +79,7 @@ conn = sqlite3.connect('data.sqlite')
 cursor = conn.cursor()
 
 
-def load_prompts(filepath='prompts.txt'):
+def load_text_data(filepath):
     prompts = {}
     current_key = None
     with open(filepath, 'r', encoding='utf-8') as file:
@@ -83,9 +93,11 @@ def load_prompts(filepath='prompts.txt'):
     return prompts
 
 
-prompts = load_prompts()
+prompts = load_text_data('prompts.txt')
+help_texts = load_text_data('help_texts.txt')
 
 
+# Default query_llm function
 def default_query_llm(prompt):
     try:
         response = model.generate_content(
@@ -99,75 +111,179 @@ def default_query_llm(prompt):
         return "An error occurred. Please try again later."
 
 
-# Dictionary to store users who are in the process of updating query_gemini
-updating_users = {}
+def get_chat_functions_file(chat_id):
+    return os.path.join(CHAT_FUNCTIONS_DIR, f'{chat_id}_functions.json')
 
-# Dictionary to store chat-specific query_llm functions
-chat_query_llm = {}
+
+def load_chat_functions(chat_id):
+    file_path = get_chat_functions_file(chat_id)
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_chat_functions(chat_id, functions):
+    file_path = get_chat_functions_file(chat_id)
+    with open(file_path, 'w') as f:
+        json.dump(functions, f)
 
 
 @client.on(events.NewMessage(pattern='/update_query_llm'))
 async def handle_update_query_llm(event):
     sender = await event.get_sender()
     chat_id = event.chat_id
-    updating_users[sender.id] = chat_id
-    await event.reply("Please send a .txt file containing the new query_llm function code.")
+    await event.reply("Пожалуйста, введите имя для новой функции (не может быть 'default'):")
+    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'naming'}
 
 
-@client.on(events.NewMessage(func=lambda e: e.document))
-async def handle_document(event):
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'naming'))
+async def handle_function_name(event):
     sender = await event.get_sender()
-    if sender.id not in updating_users:
+    chat_id = updating_users[sender.id]['chat_id']
+    name = event.message.text.strip()
+
+    if name == '/update_query_llm':
         return
 
-    chat_id = updating_users[sender.id]
+    if name.lower() == 'default':
+        await event.reply("Нельзя использовать 'default' в качестве имени функции. Пожалуйста, выберите другое имя:")
+        return
+
+    chat_functions = load_chat_functions(chat_id)
+    if name in chat_functions:
+        await event.reply("Это имя уже используется. Пожалуйста, выберите другое имя:")
+        return
+
+    updating_users[sender.id]['name'] = name
+    updating_users[sender.id]['state'] = 'waiting_for_file'
+    await event.reply("Пожалуйста, отправьте .txt файл с кодом новой функции query_llm.")
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.document and e.sender_id in updating_users and updating_users[e.sender_id][
+        'state'] == 'waiting_for_file'))
+async def handle_document(event):
+    sender = await event.get_sender()
+    chat_id = updating_users[sender.id]['chat_id']
+    name = updating_users[sender.id]['name']
 
     if not event.document.attributes[-1].file_name.endswith('.txt'):
-        await event.reply("Please send a .txt file.")
+        await event.reply("Пожалуйста, отправьте .txt файл.")
         return
 
     try:
         content = await client.download_media(event.document, file=bytes)
         new_code = content.decode('utf-8')
-        await update_query_llm(event, new_code, chat_id)
+        await update_query_llm(event, new_code, chat_id, name)
     except Exception as e:
-        await event.reply(f"Error processing the file: {e}")
+        await event.reply(f"Ошибка при обработке файла: {e}")
     finally:
         del updating_users[sender.id]
 
 
-async def update_query_llm(event, new_code, chat_id):
-    # Validate the code structure
+async def update_query_llm(event, new_code, chat_id, name):
     try:
         ast.parse(new_code)
     except SyntaxError as e:
-        await event.reply(f"Syntax error in the provided code: {e}")
+        await event.reply(f"Синтаксическая ошибка в предоставленном коде: {e}")
         return
 
-    # Create a temporary function to test the new code
     try:
         exec(new_code)
         temp_query_llm = locals()['query_llm']
     except Exception as e:
-        await event.reply(f"Error in creating the function: {e}")
+        await event.reply(f"Ошибка при создании функции: {e}")
         return
 
-    # Test the new function
     try:
-        result = temp_query_llm("Test prompt")
+        result = temp_query_llm("Тестовый запрос")
         if not isinstance(result, str):
-            raise ValueError("Function must return a string")
+            raise ValueError("Функция должна возвращать строку")
     except Exception as e:
-        await event.reply(f"Error in testing the new function: {e}")
+        await event.reply(f"Ошибка при тестировании новой функции: {e}")
         return
 
-    # If all checks pass, update the chat-specific query_llm function
-    chat_query_llm[chat_id] = temp_query_llm
-    await event.reply("query_llm function has been successfully updated for this chat!")
+    chat_functions = load_chat_functions(chat_id)
+    chat_functions[name] = new_code
+    save_chat_functions(chat_id, chat_functions)
+    await event.reply(f"Функция query_llm '{name}' успешно сохранена для этого чата!")
+    await change_active_function(event.chat_id, name)
+
+
+@client.on(events.NewMessage(pattern='/list_functions'))
+async def list_functions(event):
+    chat_id = event.chat_id
+    chat_functions = load_chat_functions(chat_id)
+    function_list = "Доступные функции:\n- default (встроенная)\n" + "\n".join(
+        f"- {name}" for name in chat_functions if name != 'current_function')
+    await event.reply(function_list)
+
+
+@client.on(events.NewMessage(pattern='/set_function'))
+async def set_function(event):
+    chat_id = event.chat_id
+    chat_functions = load_chat_functions(chat_id)
+    function_list = "Выберите функцию для использования:\n0. default (встроенная)\n" + "\n".join(
+        f"{i + 1}. {name}" for i, name in enumerate(chat_functions) if name != 'current_function')
+    await event.reply(function_list + "\n\nОтветьте номером функции, которую вы хотите использовать.")
+    updating_users[event.sender_id] = {'chat_id': chat_id, 'state': 'selecting_function'}
+
+
+async def change_active_function(chat_id, function_name):
+    chat_functions = load_chat_functions(chat_id)
+    if function_name == 'default' or function_name in chat_functions:
+        with open(get_chat_functions_file(chat_id), 'r+') as f:
+            data = json.load(f)
+            data['current_function'] = function_name
+            f.seek(0)
+            json.dump(data, f)
+            f.truncate()
+        return True
+    return False
+
+
+@client.on(events.NewMessage(
+    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'selecting_function'))
+async def handle_function_selection(event):
+    sender = await event.get_sender()
+    chat_id = updating_users[sender.id]['chat_id']
+    chat_functions = load_chat_functions(chat_id)
+    if event.message.text == '/set_function':
+        return
+    try:
+        selection = int(event.message.text.strip()) - 1
+        if selection == -1:
+            function_name = 'default'
+        else:
+            function_name = list(chat_functions.keys())[selection]
+
+        if await change_active_function(chat_id, function_name):
+            await event.reply(f"Успешно установлена текущая функция '{function_name}'.")
+        else:
+            await event.reply("Не удалось установить выбранную функцию. Пожалуйста, попробуйте еще раз.")
+    except (ValueError, IndexError):
+        await event.reply("Неверный выбор. Пожалуйста, попробуйте еще раз.")
+    finally:
+        del updating_users[sender.id]
 
 
 async def get_query_llm(chat_id):
-    return chat_query_llm.get(chat_id, default_query_llm)
+    chat_functions = load_chat_functions(chat_id)
+    current_function = chat_functions.get('current_function', 'default')
+
+    if current_function == 'default':
+        return default_query_llm
+    else:
+        function_code = chat_functions.get(current_function)
+        if function_code:
+            exec(function_code)
+            return locals()['query_llm']
+        else:
+            logging.warning(
+                f"Функция '{current_function}' не найдена для чата {chat_id}. Используется функция по умолчанию.")
+            return default_query_llm
 
 
 async def get_chat_messages(chat_id: int, date: str):
@@ -205,15 +321,13 @@ async def ask_question(chat_id: int, question: str):
     df = await get_last_messages(chat_id)
 
     if df.empty:
-        return "No messages found in the chat history."
+        return "В истории чата не найдено сообщений."
 
-    # Prepare the prompt for the LLM
     prompt = prompts['ASK_PROMPT'].format(question=question)
 
     for _, row in df.iterrows():
         prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
 
-    # Get answer from the chat-specific LLM function
     query_llm = await get_query_llm(chat_id)
     answer = query_llm(prompt)
     return answer
@@ -289,7 +403,34 @@ async def handler(event: events.NewMessage.Event):
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.reply("Welcome! I can summarize your chat. Use /summarize <YYYY-MM-DD> to get a summary.")
+    welcome_message = help_texts['START']
+    await event.reply(welcome_message)
+
+
+@client.on(events.NewMessage(pattern='/help'))
+async def help(event):
+    help_message = help_texts['HELP']
+    await event.reply(help_message)
+
+
+# Добавим дополнительные команды для получения справки по конкретным функциям
+
+@client.on(events.NewMessage(pattern='/summarize --help'))
+async def summarize_help(event):
+    help_message = help_texts['SUMMARIZE_HELP']
+    await event.reply(help_message)
+
+
+@client.on(events.NewMessage(pattern='/ask --help'))
+async def ask_help(event):
+    help_message = help_texts['ASK_HELP']
+    await event.reply(help_message)
+
+
+@client.on(events.NewMessage(pattern='/update_query_llm --help'))
+async def update_query_llm_help(event):
+    help_message = help_texts['UPDATE_QUERY_LLM_HELP']
+    await event.reply(help_message)
 
 
 @client.on(events.NewMessage(pattern='/summarize'))
