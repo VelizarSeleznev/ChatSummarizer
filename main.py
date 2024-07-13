@@ -140,19 +140,29 @@ class CommandHandler:
 
         if message.text.startswith('/'):
             command = message.text.split()[0][1:]
-            if command in self.command_callbacks:
+            if command == 'cancel':
+                await self.cancel_command(event)
+            elif command in self.command_callbacks:
                 self.user_states[sender_id] = CommandState.WAITING_FOR_INPUT
                 self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
                 await self.command_callbacks[command](event, self.user_contexts[sender_id])
-            else:
-                pass
-                # await event.reply("Unknown command. Type /help for a list of available commands.")
         elif sender_id in self.user_states and self.user_states[sender_id] == CommandState.WAITING_FOR_INPUT:
             command = self.user_contexts[sender_id]['command']
             await self.command_callbacks[command](event, self.user_contexts[sender_id])
-        else:
-            # Handle regular messages
-            pass
+
+    async def cancel_command(self, event):
+        sender_id = event.sender_id
+        if sender_id in self.user_states:
+            del self.user_states[sender_id]
+        if sender_id in self.user_contexts:
+            del self.user_contexts[sender_id]
+        await event.reply("Current operation has been cancelled.")
+
+    def reset_user_state(self, sender_id: int):
+        if sender_id in self.user_states:
+            del self.user_states[sender_id]
+        if sender_id in self.user_contexts:
+            del self.user_contexts[sender_id]
 
     def reset_user_state(self, sender_id: int):
         if sender_id in self.user_states:
@@ -303,14 +313,19 @@ def save_chat_functions(chat_id, functions):
 async def handle_update_prompt(event, context):
     sender_id = event.sender_id
 
+    if event.message.text == '/cancel':
+        command_handler.reset_user_state(sender_id)
+        await event.reply("Operation cancelled.")
+        return
+
     if 'step' not in context:
         context['step'] = 'prompt_naming'
-        await event.reply("Enter the name of the prompt you want to update:")
+        await event.reply("Enter the name of the prompt you want to update (or /cancel to abort):")
     elif context['step'] == 'prompt_naming':
         prompt_name = event.message.text.strip().upper()
         context['prompt_name'] = prompt_name
         context['step'] = 'waiting_for_prompt'
-        await event.reply(f"Please send the new content for the prompt '{prompt_name}'.")
+        await event.reply(f"Please send the new content for the prompt '{prompt_name}' (or /cancel to abort).")
     elif context['step'] == 'waiting_for_prompt':
         new_prompt = event.message.text
         chat_id = context['chat_id']
@@ -381,14 +396,19 @@ async def handle_new_prompt(event):
 async def handle_update_limit(event, context):
     sender_id = event.sender_id
 
+    if event.message.text == '/cancel':
+        command_handler.reset_user_state(sender_id)
+        await event.reply("Operation cancelled.")
+        return
+
     if 'step' not in context:
         context['step'] = 'limit_naming'
-        await event.reply("Enter the name of the limit you want to update:")
+        await event.reply("Enter the name of the limit you want to update (or /cancel to abort):")
     elif context['step'] == 'limit_naming':
         limit_name = event.message.text.strip().lower()
         context['limit_name'] = limit_name
         context['step'] = 'waiting_for_limit'
-        await event.reply(f"Please send the new value for the limit '{limit_name}' (must be a positive integer):")
+        await event.reply(f"Please send the new value for the limit '{limit_name}' (must be a positive integer, or /cancel to abort):")
     elif context['step'] == 'waiting_for_limit':
         try:
             new_limit = int(event.message.text)
@@ -481,20 +501,25 @@ async def cancel_dialogue(event):
 async def handle_update_query_llm(event, context):
     sender_id = event.sender_id
 
+    if event.message.text == '/cancel':
+        command_handler.reset_user_state(sender_id)
+        await event.reply("Operation cancelled.")
+        return
+
     if 'step' not in context:
         context['step'] = 'naming'
-        await event.reply("Please enter a name for the new function (cannot be 'default'):")
+        await event.reply("Please enter a name for the new function (cannot be 'default', or /cancel to abort):")
     elif context['step'] == 'naming':
         name = event.message.text.strip()
         if name.lower() == 'default':
-            await event.reply("'default' cannot be used as a function name. Please choose another name:")
+            await event.reply("'default' cannot be used as a function name. Please choose another name (or /cancel to abort):")
             return
         context['name'] = name
         context['step'] = 'waiting_for_file'
-        await event.reply("Please send a .txt file with the code for the new query_llm function.")
+        await event.reply("Please send a .txt file with the code for the new query_llm function (or /cancel to abort).")
     elif context['step'] == 'waiting_for_file':
         if not event.message.document or not event.message.document.attributes[-1].file_name.endswith('.txt'):
-            await event.reply("Please send a .txt file.")
+            await event.reply("Please send a .txt file (or /cancel to abort).")
             return
         try:
             content = await client.download_media(event.message.document, file=bytes)
