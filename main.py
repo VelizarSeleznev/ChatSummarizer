@@ -93,8 +93,8 @@ safety_settings = {
 
 # Define generation config for Gemini
 generation_config = GenerationConfig(
-    temperature=0.1,
-    top_k=40,
+    temperature=1,
+    top_k=4,
     # top_p=0.95,
     # max_output_tokens=1024,
 )
@@ -177,7 +177,7 @@ command_handler = CommandHandler()
 
 # Default query_llm function
 def default_query_llm(prompt):
-    return query_claude(prompt)
+    return query_gemini(prompt)
 
 
 def query_gemini(prompt):
@@ -732,7 +732,7 @@ async def switch_llm(event):
 async def get_chat_messages(chat_id: int, date: str):
     db = DBManager.get_db(chat_id)
     query = f"""
-    SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
+    SELECT m.id, m.date, u.first_name, m.content, COUNT(r.id) as reaction_count
     FROM messages m
     JOIN users u ON m.user_id = u.id
     LEFT JOIN reactions r ON m.id = r.message_id
@@ -748,9 +748,8 @@ async def get_chat_messages(chat_id: int, date: str):
 
 async def get_last_messages(chat_id: int, limit: int):
     db = DBManager.get_db(chat_id)
-    # chat_limits = load_chat_limits(chat_id)
     query = f"""
-    SELECT m.id, m.date, u.username, m.content
+    SELECT m.id, m.date, u.first_name, m.content
     FROM messages m
     JOIN users u ON m.user_id = u.id
     ORDER BY m.date DESC
@@ -758,7 +757,7 @@ async def get_last_messages(chat_id: int, limit: int):
     """
 
     df = pd.read_sql_query(query, db.conn)
-    return df.sort_values('date')  # Sort by date in ascending order
+    return df.sort_values('date')
 
 
 async def ask_question(chat_id: int, question: str):
@@ -771,7 +770,7 @@ async def ask_question(chat_id: int, question: str):
 
     prompt = chat_prompts['ASK_PROMPT'].format(question=question)
     for _, row in df.iterrows():
-        string = f"{row['date']} - {row['username']}: {row['content']}\n"
+        string = f"{row['date']} - {row['first_name']}: {row['content']}\n"
         if check_format(string):
             prompt += string
 
@@ -956,7 +955,7 @@ async def summarize(event):
 async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str, limit: int):
     db = DBManager.get_db(chat_id)
     query = f"""
-    SELECT m.id, m.date, u.username, m.content, COUNT(r.id) as reaction_count
+    SELECT m.id, m.date, u.first_name, m.content, COUNT(r.id) as reaction_count
     FROM messages m
     JOIN users u ON m.user_id = u.id
     LEFT JOIN reactions r ON m.id = r.message_id
@@ -1004,7 +1003,8 @@ async def get_user_info(event, db):
 
     # Get user from reply or username
     if replied_to:
-        user_id = replied_to.from_id.id
+        user = await client.get_entity(replied_to.from_id)
+        user_id = user.id
     elif username:
         user = await client.get_entity(username)
         user_id = user.id
@@ -1028,7 +1028,7 @@ async def get_user_info(event, db):
 
     if not question:
         # If no question, return basic stats
-        return f"User: {user_data[1]}\nTotal messages: {message_count}"
+        return f"User: {user_data[2]}\nTotal messages: {message_count}"
     else:
         # If there's a question, analyze user messages
         chat_limits = load_chat_limits(chat_id)
@@ -1044,16 +1044,16 @@ async def get_user_info(event, db):
 
         # Prepare prompt for LLM
         prompt = f"""
-        User: {user_data[1]}
-        Total messages: {message_count}
-        Recent messages:
+        Пользователя зовут: {user_data[2]}
+        Пользователь написал: {message_count} сообщений
+        Задали вопрос про этого пользователя, который звучит так: {question}
+        Сообщения пользователя, про которого нужно ответить:
         {messages_text}
 
-        Question about the user: {question}
-
-        Please answer the question based on the information provided above.
+        Еще раз повторю вопрос, на который нужно ответить выше: {question}.
+        При этом можно использовать информацию из сообщений, написанных пользователем
         """
-
+        print(prompt)
         # Query LLM
         query_llm = await get_query_llm(chat_id)
         answer = query_llm(prompt)
@@ -1088,7 +1088,7 @@ async def _get_user(user_id: int, chat_id: int) -> User:
         return db_user
     except Exception as e:
         logging.error(f"Ошибка получения пользователя: {e}")
-        return User(id=user_id, username=str(user_id), first_name=None, last_name=None, tags="", avatar=None)
+        return User(id=user_id, username=str(user_id), first_name=str(user_id), last_name=None, tags="", avatar=None)
 
 
 async def _process_media(message: Message) -> Media:
