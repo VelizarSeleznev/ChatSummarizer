@@ -145,7 +145,8 @@ class CommandHandler:
                 self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
                 await self.command_callbacks[command](event, self.user_contexts[sender_id])
             else:
-                await event.reply("Unknown command. Type /help for a list of available commands.")
+                pass
+                # await event.reply("Unknown command. Type /help for a list of available commands.")
         elif sender_id in self.user_states and self.user_states[sender_id] == CommandState.WAITING_FOR_INPUT:
             command = self.user_contexts[sender_id]['command']
             await self.command_callbacks[command](event, self.user_contexts[sender_id])
@@ -750,8 +751,6 @@ async def ask_question(chat_id: int, question: str):
             prompt += string
 
     query_llm = await get_query_llm(chat_id)
-    print(chat_limits['ask_limit'])
-    # print(prompt)
     answer = query_llm(prompt)
     return answer
 
@@ -926,7 +925,6 @@ async def summarize(event):
 
     query_llm = await get_query_llm(chat_id)
     summary = query_llm(prompt)
-    print(prompt)
     await event.reply(summary)
 
 
@@ -987,8 +985,6 @@ async def get_user_info(event, db):
         user_id = user.id
     else:
         return "Please provide a username or reply to a user's message."
-
-    print(user_id)
 
     # Get user data from the database
     cursor = db.conn.cursor()
