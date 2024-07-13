@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
+from telethon.tl.types import User as TelegramUser
 import ast
 import json
 
@@ -37,6 +38,7 @@ API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Directory to store chat-specific LLM functions
 CHAT_FUNCTIONS_DIR = 'chat_functions'
@@ -51,9 +53,9 @@ os.makedirs(CHAT_LIMITS_DIR, exist_ok=True)
 
 # Default limits
 DEFAULT_LIMITS = {
-    'summarize_limit': 5000,
-    'ask_limit': 5000,
-    'last_messages_limit': 5000
+    'summarize_limit': 500,
+    'ask_limit': 500,
+    'last_messages_limit': 500
 }
 
 # Add this global variable to store users in ongoing dialogues
@@ -118,6 +120,10 @@ help_texts = load_text_data('help_texts.txt')
 
 # Default query_llm function
 def default_query_llm(prompt):
+    return query_claude(prompt)
+
+
+def query_gemini(prompt):
     try:
         response = model.generate_content(
             prompt,
@@ -128,6 +134,61 @@ def default_query_llm(prompt):
     except Exception as e:
         logging.error(f"An error occurred while querying the LLM: {e}")
         return "An error occurred. Please try again later."
+
+
+def query_claude(prompt):
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01"
+    }
+
+    data = {
+        "model": "claude-3-sonnet-20240229",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
+    response = requests.post("https://api.anthropic.com/v1/messages", json=data, headers=headers)
+
+    if response.status_code == 200:
+        return response.json()['content'][0]['text']
+    else:
+        return f"Error: {response.status_code}, {response.text}"
+
+
+def check_format(string):
+    # Регулярное выражение для основного формата
+    main_pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [a-zA-Z0-9_]+: .+$'
+
+    # Регулярное выражение для поиска смайликов (эмодзи)
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"  # Emoticons
+        u"\U0001F300-\U0001F5FF"  # Symbols & Pictographs
+        u"\U0001F680-\U0001F6FF"  # Transport & Map Symbols
+        u"\U0001F700-\U0001F77F"  # Alchemical Symbols
+        u"\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
+        u"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
+        u"\U0001F900-\U0001F9FF"  # Supplemental Symbols & Pictographs
+        u"\U0001FA00-\U0001FA6F"  # Chess Symbols
+        u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+        u"\U00002702-\U000027B0"  # Dingbats
+        u"\U000024C2-\U0001F251"
+        "]+", flags=re.UNICODE)
+
+    # Регулярное выражение для поиска ссылок
+    url_pattern = re.compile(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+
+    if not re.match(main_pattern, string):
+        return False
+    if emoji_pattern.search(string):
+        return False
+    if url_pattern.search(string):
+        return False
+
+    return True
 
 
 def get_chat_functions_file(chat_id):
@@ -174,8 +235,16 @@ def load_chat_functions(chat_id):
     file_path = get_chat_functions_file(chat_id)
     if os.path.exists(file_path):
         with open(file_path, 'r') as f:
-            return json.load(f)
-    return {}
+            data = json.load(f)
+    else:
+        data = {
+            'current_function': 'claude',
+            'claude': 'default_query_llm',
+            'gemini': 'query_gemini'
+        }
+        with open(file_path, 'w') as f:
+            json.dump(data, f)
+    return data
 
 
 def save_chat_functions(chat_id, functions):
@@ -324,7 +393,7 @@ async def cancel_dialogue(event):
             del updating_users[sender_id]
         # await event.reply("Current operation has been cancelled.")
     # else:
-        # await event.reply("There's no ongoing operation to cancel.")
+    # await event.reply("There's no ongoing operation to cancel.")
 
 
 @client.on(events.NewMessage(pattern='/update_query_llm'))
@@ -497,10 +566,12 @@ async def handle_function_selection(event):
 
 async def get_query_llm(chat_id):
     chat_functions = load_chat_functions(chat_id)
-    current_function = chat_functions.get('current_function', 'default')
+    current_function = chat_functions.get('current_function', 'claude')
 
-    if current_function == 'default':
+    if current_function == 'claude':
         return default_query_llm
+    elif current_function == 'gemini':
+        return query_gemini
     else:
         function_code = chat_functions.get(current_function)
         if function_code:
@@ -508,8 +579,24 @@ async def get_query_llm(chat_id):
             return locals()['query_llm']
         else:
             logging.warning(
-                f"Функция '{current_function}' не найдена для чата {chat_id}. Используется функция по умолчанию.")
+                f"Function '{current_function}' not found for chat {chat_id}. Using Claude as default.")
             return default_query_llm
+
+
+# Add a new command to switch between Claude and Gemini
+@client.on(events.NewMessage(pattern='/switch_llm'))
+async def switch_llm(event):
+    chat_id = event.chat_id
+    chat_functions = load_chat_functions(chat_id)
+    current_function = chat_functions.get('current_function', 'claude')
+
+    new_function = 'gemini' if current_function == 'claude' else 'claude'
+    chat_functions['current_function'] = new_function
+
+    with open(get_chat_functions_file(chat_id), 'w') as f:
+        json.dump(chat_functions, f)
+
+    await event.reply(f"Switched to {new_function.capitalize()} for LLM queries.")
 
 
 async def get_chat_messages(chat_id: int, date: str):
@@ -531,13 +618,13 @@ async def get_chat_messages(chat_id: int, date: str):
 
 async def get_last_messages(chat_id: int, limit: int):
     db = DBManager.get_db(chat_id)
-    chat_limits = load_chat_limits(chat_id)
+    # chat_limits = load_chat_limits(chat_id)
     query = f"""
     SELECT m.id, m.date, u.username, m.content
     FROM messages m
     JOIN users u ON m.user_id = u.id
     ORDER BY m.date DESC
-    LIMIT {chat_limits['last_messages_limit']}
+    LIMIT {limit}
     """
 
     df = pd.read_sql_query(query, db.conn)
@@ -553,12 +640,14 @@ async def ask_question(chat_id: int, question: str):
         return "В истории чата не найдено ни одного сообщения."
 
     prompt = chat_prompts['ASK_PROMPT'].format(question=question)
-
     for _, row in df.iterrows():
-        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
+        string = f"{row['date']} - {row['username']}: {row['content']}\n"
+        if check_format(string):
+            prompt += string
 
     query_llm = await get_query_llm(chat_id)
-    print(prompt)
+    print(chat_limits['ask_limit'])
+    # print(prompt)
     answer = query_llm(prompt)
     return answer
 
@@ -727,7 +816,9 @@ async def summarize(event):
     prompt = chat_prompts['SUMMARIZE_PROMPT']
 
     for _, row in df.iterrows():
-        prompt += f"{row['date']} - {row['username']}: {row['content']}\n"
+        string = f"{row['date']} - {row['username']}: {row['content']}\n"
+        if check_format(string):
+            prompt += string
 
     query_llm = await get_query_llm(chat_id)
     summary = query_llm(prompt)
@@ -773,6 +864,85 @@ async def stats(event):
     stats_message += f"Total Reactions: {total_reactions}"
 
     await event.reply(stats_message)
+
+
+async def get_user_info(event, db):
+    chat_id = event.chat_id
+    message = event.message
+    replied_to = await message.get_reply_message()
+
+    # Extract username if provided
+    username_match = re.search(r'@(\w+)', message.text)
+    username = username_match.group(1) if username_match else None
+
+    # Get user from reply or username
+    if replied_to:
+        user_id = replied_to.from_id.id
+    elif username:
+        user = await client.get_entity(username)
+        user_id = user.id
+    else:
+        return "Please provide a username or reply to a user's message."
+
+    print(user_id)
+
+    # Get user data from the database
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user_data = cursor.fetchone()
+
+    if not user_data:
+        return "User not found in the database."
+
+    # Get user message count
+    cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
+    message_count = cursor.fetchone()[0]
+
+    # Check if there's a question after the command
+    question = re.sub(r'^/user_info(@\w+)?(\s+)?', '', message.text).strip()
+
+    if not question:
+        # If no question, return basic stats
+        return f"User: {user_data[1]}\nTotal messages: {message_count}"
+    else:
+        # If there's a question, analyze user messages
+        chat_limits = load_chat_limits(chat_id)
+        cursor.execute(f"""
+            SELECT content FROM messages 
+            WHERE user_id = ? 
+            ORDER BY date DESC 
+            LIMIT {chat_limits['ask_limit']}
+        """, (user_id,))
+        user_messages = cursor.fetchall()
+
+        messages_text = "\n".join([msg[0] for msg in user_messages])
+
+        # Prepare prompt for LLM
+        prompt = f"""
+        User: {user_data[1]}
+        Total messages: {message_count}
+        Recent messages:
+        {messages_text}
+
+        Question about the user: {question}
+
+        Please answer the question based on the information provided above.
+        """
+
+        # Query LLM
+        query_llm = await get_query_llm(chat_id)
+        answer = query_llm(prompt)
+
+        return answer
+
+
+@client.on(events.NewMessage(pattern='/user_info'))
+async def handle_user_info(event):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+
+    response = await get_user_info(event, db)
+    await event.reply(response)
 
 
 async def _get_user(user_id: int, chat_id: int) -> User:
