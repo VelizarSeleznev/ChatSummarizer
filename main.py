@@ -18,6 +18,8 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
 from telethon.tl.types import User as TelegramUser
+from enum import Enum, auto
+from typing import Dict, Callable, Any
 import ast
 import json
 
@@ -116,6 +118,50 @@ def load_text_data(filepath):
 
 prompts = load_text_data('prompts.txt')
 help_texts = load_text_data('help_texts.txt')
+
+
+class CommandState(Enum):
+    IDLE = auto()
+    WAITING_FOR_INPUT = auto()
+
+
+class CommandHandler:
+    def __init__(self):
+        self.user_states: Dict[int, CommandState] = {}
+        self.user_contexts: Dict[int, Any] = {}
+        self.command_callbacks: Dict[str, Callable] = {}
+
+    def register_command(self, command: str, callback: Callable):
+        self.command_callbacks[command] = callback
+
+    async def handle_message(self, event):
+        sender_id = event.sender_id
+        message = event.message
+
+        if message.text.startswith('/'):
+            command = message.text.split()[0][1:]
+            if command in self.command_callbacks:
+                self.user_states[sender_id] = CommandState.WAITING_FOR_INPUT
+                self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
+                await self.command_callbacks[command](event, self.user_contexts[sender_id])
+            else:
+                await event.reply("Unknown command. Type /help for a list of available commands.")
+        elif sender_id in self.user_states and self.user_states[sender_id] == CommandState.WAITING_FOR_INPUT:
+            command = self.user_contexts[sender_id]['command']
+            await self.command_callbacks[command](event, self.user_contexts[sender_id])
+        else:
+            # Handle regular messages
+            pass
+
+    def reset_user_state(self, sender_id: int):
+        if sender_id in self.user_states:
+            del self.user_states[sender_id]
+        if sender_id in self.user_contexts:
+            del self.user_contexts[sender_id]
+
+
+# Initialize the command handler
+command_handler = CommandHandler()
 
 
 # Default query_llm function
@@ -253,13 +299,28 @@ def save_chat_functions(chat_id, functions):
         json.dump(functions, f)
 
 
-@client.on(events.NewMessage(pattern='/update_prompt'))
-async def handle_update_prompt(event):
-    sender = await event.get_sender()
-    chat_id = event.chat_id
-    ongoing_dialogues.add(sender.id)
-    await event.reply("Введите имя промпта, который вы хотите обновить (например, 'ASK_PROMPT', 'SUMMARIZE_PROMPT'):")
-    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'prompt_naming'}
+async def handle_update_prompt(event, context):
+    sender_id = event.sender_id
+
+    if 'step' not in context:
+        context['step'] = 'prompt_naming'
+        await event.reply("Enter the name of the prompt you want to update:")
+    elif context['step'] == 'prompt_naming':
+        prompt_name = event.message.text.strip().upper()
+        context['prompt_name'] = prompt_name
+        context['step'] = 'waiting_for_prompt'
+        await event.reply(f"Please send the new content for the prompt '{prompt_name}'.")
+    elif context['step'] == 'waiting_for_prompt':
+        new_prompt = event.message.text
+        chat_id = context['chat_id']
+        chat_prompts = load_chat_prompts(chat_id)
+        chat_prompts[context['prompt_name']] = new_prompt
+        save_chat_prompts(chat_id, chat_prompts)
+        await event.reply(f"Prompt '{context['prompt_name']}' has been updated.")
+        command_handler.reset_user_state(sender_id)
+
+
+command_handler.register_command('update_prompt', handle_update_prompt)
 
 
 @client.on(events.NewMessage(
@@ -316,14 +377,34 @@ async def handle_new_prompt(event):
     del updating_users[sender.id]
 
 
-@client.on(events.NewMessage(pattern='/update_limit'))
-async def handle_update_limit(event):
-    sender = await event.get_sender()
-    chat_id = event.chat_id
-    await event.reply(
-        "Введите имя лимита, который вы хотите обновить (например, 'summarize_limit', 'ask_limit', 'last_messages_limit'):")
-    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'limit_naming'}
-    ongoing_dialogues.add(sender.id)
+async def handle_update_limit(event, context):
+    sender_id = event.sender_id
+
+    if 'step' not in context:
+        context['step'] = 'limit_naming'
+        await event.reply("Enter the name of the limit you want to update:")
+    elif context['step'] == 'limit_naming':
+        limit_name = event.message.text.strip().lower()
+        context['limit_name'] = limit_name
+        context['step'] = 'waiting_for_limit'
+        await event.reply(f"Please send the new value for the limit '{limit_name}' (must be a positive integer):")
+    elif context['step'] == 'waiting_for_limit':
+        try:
+            new_limit = int(event.message.text)
+            if new_limit <= 0:
+                raise ValueError
+            chat_id = context['chat_id']
+            chat_limits = load_chat_limits(chat_id)
+            chat_limits[context['limit_name']] = new_limit
+            save_chat_limits(chat_id, chat_limits)
+            await event.reply(f"Limit '{context['limit_name']}' has been updated to {new_limit}.")
+        except ValueError:
+            await event.reply("Invalid input. Please enter a positive integer.")
+        finally:
+            command_handler.reset_user_state(sender_id)
+
+
+command_handler.register_command('update_limit', handle_update_limit)
 
 
 @client.on(events.NewMessage(
@@ -396,13 +477,36 @@ async def cancel_dialogue(event):
     # await event.reply("There's no ongoing operation to cancel.")
 
 
-@client.on(events.NewMessage(pattern='/update_query_llm'))
-async def handle_update_query_llm(event):
-    sender = await event.get_sender()
-    ongoing_dialogues.add(sender.id)
-    chat_id = event.chat_id
-    await event.reply("Пожалуйста, введите имя для новой функции (не может быть 'default'):")
-    updating_users[sender.id] = {'chat_id': chat_id, 'state': 'naming'}
+async def handle_update_query_llm(event, context):
+    sender_id = event.sender_id
+
+    if 'step' not in context:
+        context['step'] = 'naming'
+        await event.reply("Please enter a name for the new function (cannot be 'default'):")
+    elif context['step'] == 'naming':
+        name = event.message.text.strip()
+        if name.lower() == 'default':
+            await event.reply("'default' cannot be used as a function name. Please choose another name:")
+            return
+        context['name'] = name
+        context['step'] = 'waiting_for_file'
+        await event.reply("Please send a .txt file with the code for the new query_llm function.")
+    elif context['step'] == 'waiting_for_file':
+        if not event.message.document or not event.message.document.attributes[-1].file_name.endswith('.txt'):
+            await event.reply("Please send a .txt file.")
+            return
+        try:
+            content = await client.download_media(event.message.document, file=bytes)
+            new_code = content.decode('utf-8')
+            chat_id = context['chat_id']
+            await update_query_llm(event, new_code, chat_id, context['name'])
+        except Exception as e:
+            await event.reply(f"Error processing file: {e}")
+        finally:
+            command_handler.reset_user_state(sender_id)
+
+
+command_handler.register_command('update_query_llm', handle_update_query_llm)
 
 
 @client.on(events.NewMessage(
@@ -1017,9 +1121,18 @@ async def _process_reactions(message: Message, chat_id: int) -> None:
                 f"Error fetching or processing reactions: {e}")
 
 
+@client.on(events.NewMessage)
+async def handler(event):
+    await command_handler.handle_message(event)
+
+
+
 async def main():
     """Запустите бота и ждите новых сообщений."""
     logging.info("Бот запущен!")
+    command_handler.register_command('update_query_llm', handle_update_query_llm)
+    command_handler.register_command('update_prompt', handle_update_prompt)
+    command_handler.register_command('update_limit', handle_update_limit)
     await client.run_until_disconnected()
 
 
