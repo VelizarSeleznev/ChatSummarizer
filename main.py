@@ -93,8 +93,8 @@ safety_settings = {
 
 # Define generation config for Gemini
 generation_config = GenerationConfig(
-    temperature=1,
-    top_k=4,
+    temperature=0.5,
+    top_k=10,
     # top_p=0.95,
     # max_output_tokens=1024,
 )
@@ -804,13 +804,28 @@ async def _word_trend(event):
     await word_trend(event, client)
 
 
-@client.on(events.NewMessage(pattern=r'/ask (.+)'))
+@client.on(events.NewMessage(pattern=r'/ask'))
 async def handle_ask(event):
     chat_id = event.chat_id
-    question = event.pattern_match.group(1)
+    message = event.message
+    db = DBManager.get_db(chat_id)
 
-    answer = await ask_question(chat_id, question)
-    await event.reply(answer)
+    # Check if there's a reply or a user mention
+    replied_to = await message.get_reply_message()
+    username_match = re.search(r'@(\w+)', message.text)
+
+    if replied_to or username_match:
+        # Use user_info functionality
+        response = await get_user_info(event, db)
+    else:
+        # Use original ask functionality
+        question = re.sub(r'^/ask(@\w+)?(\s+)?', '', message.text).strip()
+        if not question:
+            response = "Please provide a question after the /ask command."
+        else:
+            response = await ask_question(chat_id, question)
+
+    await event.reply(response)
 
 
 @client.on(events.NewMessage)
@@ -1024,41 +1039,60 @@ async def get_user_info(event, db):
     message_count = cursor.fetchone()[0]
 
     # Check if there's a question after the command
-    question = re.sub(r'^/user_info(@\w+)?(\s+)?', '', message.text).strip()
+    question = re.sub(r'^/ask(@\w+)?(\s+)?(@\w+)?(\s+)?', '', message.text).strip()
 
-    if not question:
-        # If no question, return basic stats
-        return f"User: {user_data[2]}\nTotal messages: {message_count}"
-    else:
-        # If there's a question, analyze user messages
-        chat_limits = load_chat_limits(chat_id)
-        cursor.execute(f"""
-            SELECT content FROM messages 
-            WHERE user_id = ? 
-            ORDER BY date DESC 
-            LIMIT {chat_limits['ask_limit']}
-        """, (user_id,))
-        user_messages = cursor.fetchall()
+    # Get user messages
+    chat_limits = load_chat_limits(chat_id)
+    cursor.execute(f"""
+        SELECT content FROM messages 
+        WHERE user_id = ? 
+        ORDER BY date DESC 
+        LIMIT {chat_limits['ask_limit']}
+    """, (user_id,))
+    user_messages = cursor.fetchall()
 
-        messages_text = "\n".join([msg[0] for msg in user_messages])
+    messages_text = "\n".join([msg[0] for msg in user_messages])
 
-        # Prepare prompt for LLM
-        prompt = f"""
-        Пользователя зовут: {user_data[2]}
-        Пользователь написал: {message_count} сообщений
-        Задали вопрос про этого пользователя, который звучит так: {question}
-        Сообщения пользователя, про которого нужно ответить:
-        {messages_text}
+    # Prepare improved prompt for LLM
+    prompt = f"""
+    Задача: Создать точный и подробный портрет пользователя на основе его сообщений в чате.
 
-        Еще раз повторю вопрос, на который нужно ответить выше: {question}.
-        При этом можно использовать информацию из сообщений, написанных пользователем
-        """
-        print(prompt)
-        # Query LLM
-        query_llm = await get_query_llm(chat_id)
-        answer = query_llm(prompt)
+    Данные о пользователе:
+    - Имя: {user_data[2]}
+    - Общее количество сообщений: {message_count}
 
-        return answer
+    Инструкции:
+    1. Внимательно проанализируйте предоставленные сообщения пользователя.
+    2. Определите ключевые характеристики пользователя, включая:
+       - Основные темы и интересы
+       - Стиль общения и язык
+       - Эмоциональный тон сообщений
+       - Уровень активности и вовлеченности в обсуждения
+       - Отношение к другим участникам чата
+       - Уровень экспертизы в обсуждаемых темах
+    3. Для каждой выявленной характеристики приведите конкретный пример из сообщений пользователя.
+    4. Если возможно, определите роль пользователя в чате (например, лидер мнений, эксперт, новичок, троллЬ и т.д.).
+    5. Укажите любые заметные изменения в поведении или интересах пользователя со временем.
+    6. Если задан конкретный вопрос, ответьте на него, основываясь на проведенном анализе.
+
+    Сообщения пользователя для анализа:
+    {messages_text}
+
+    Вопрос (если есть): {question}
+
+    Формат ответа:
+    1. Краткое общее описание пользователя (2-3 предложения)
+    2. Подробный анализ по каждому пункту инструкций с примерами
+    3. Ответ на конкретный вопрос (если задан)
+
+    Важно: Все утверждения должны быть подкреплены примерами из сообщений пользователя. Избегайте необоснованных предположений.
+    """
+
+    # Query LLM
+    query_llm = await get_query_llm(chat_id)
+    answer = query_llm(prompt)
+
+    return answer
 
 
 @client.on(events.NewMessage(pattern='/user_info'))
