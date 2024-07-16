@@ -16,8 +16,16 @@ import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from telethon.tl.functions.messages import GetMessageReactionsListRequest
 from telethon.tl.types import User as TelegramUser
+from telethon.tl.types import Channel
+from telethon.tl.types import User as TelegramUser, Channel, PeerUser, PeerChannel
+from telethon.tl.types import InputPeerUser, InputPeerChannel
+from telethon.errors import UserIdInvalidError
+from telethon.tl.types import PeerChannel, PeerChat
+from telethon.tl.types import User, Chat, Channel
+from telethon.sync import TelegramClient
 from enum import Enum, auto
 from typing import Dict, Callable, Any
 import ast
@@ -25,7 +33,8 @@ import json
 
 import requests  # сделано больше для того, чтобы использовать другие функции запроса к ллм
 
-from db import DBManager, User, Message as DBMessage, Reaction, Media
+from db import DBManager, Message as DBMessage, Reaction, Media
+from db import DBManager, User as db_User, Message
 from plotting_scripts import messages_by_day, activity_by_hour, message_length_distribution, user_activity_comparison, \
     word_trend
 
@@ -83,12 +92,11 @@ client = TelegramClient('bot_session', API_ID, API_HASH).start(
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('models/gemini-pro')
 
-# Define safety settings for Gemini
 safety_settings = {
-    'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
 # Define generation config for Gemini
@@ -408,7 +416,8 @@ async def handle_update_limit(event, context):
         limit_name = event.message.text.strip().lower()
         context['limit_name'] = limit_name
         context['step'] = 'waiting_for_limit'
-        await event.reply(f"Please send the new value for the limit '{limit_name}' (must be a positive integer, or /cancel to abort):")
+        await event.reply(
+            f"Please send the new value for the limit '{limit_name}' (must be a positive integer, or /cancel to abort):")
     elif context['step'] == 'waiting_for_limit':
         try:
             new_limit = int(event.message.text)
@@ -512,7 +521,8 @@ async def handle_update_query_llm(event, context):
     elif context['step'] == 'naming':
         name = event.message.text.strip()
         if name.lower() == 'default':
-            await event.reply("'default' cannot be used as a function name. Please choose another name (or /cancel to abort):")
+            await event.reply(
+                "'default' cannot be used as a function name. Please choose another name (or /cancel to abort):")
             return
         context['name'] = name
         context['step'] = 'waiting_for_file'
@@ -748,16 +758,28 @@ async def get_chat_messages(chat_id: int, date: str):
 
 async def get_last_messages(chat_id: int, limit: int):
     db = DBManager.get_db(chat_id)
+    # query = f"""
+    # SELECT m.id, m.date, u.first_name, m.content
+    # FROM messages m
+    # JOIN users u ON m.user_id = u.id
+    # ORDER BY m.date DESC
+    # LIMIT {limit}
+    # """
     query = f"""
-    SELECT m.id, m.date, u.first_name, m.content
-    FROM messages m
-    JOIN users u ON m.user_id = u.id
-    ORDER BY m.date DESC
-    LIMIT {limit}
-    """
+SELECT 
+    messages.date, 
+    messages.content, 
+    users.first_name
+FROM 
+    messages
+JOIN 
+    users
+ON 
+    messages.user_id = users.id
+LIMIT {limit};"""
 
     df = pd.read_sql_query(query, db.conn)
-    return df.sort_values('date')
+    return df
 
 
 async def ask_question(chat_id: int, question: str):
@@ -773,9 +795,11 @@ async def ask_question(chat_id: int, question: str):
         string = f"{row['date']} - {row['first_name']}: {row['content']}\n"
         if check_format(string):
             prompt += string
-
+    data_as_string = df.to_string(index=False)
+    prompt += f"\n {data_as_string}"
     query_llm = await get_query_llm(chat_id)
     answer = query_llm(prompt)
+    print(prompt)
     return answer
 
 
@@ -837,7 +861,7 @@ async def handler(event: events.NewMessage.Event):
     db = DBManager.get_db(chat_id)
 
     # Получите информацию о пользователе
-    user = await _get_user(message.sender_id, chat_id)
+    user = await _get_user(event)
 
     # Обработайте медиа-файлы (если есть)
     media = await _process_media(message)
@@ -957,20 +981,22 @@ async def summarize(event):
 
     prompt = chat_prompts['SUMMARIZE_PROMPT']
 
-    for _, row in df.iterrows():
-        string = f"{row['date']} - {row['username']}: {row['content']}\n"
-        if check_format(string):
-            prompt += string
+    prompt += df.to_string(index=False)
+    # for _, row in df.iterrows():
+    #     string = f"{row['date']} - {row['username']}: {row['content']}\n"
+    #     if check_format(string):
+    #         prompt += string
 
     query_llm = await get_query_llm(chat_id)
     summary = query_llm(prompt)
+    print(prompt)
     await event.reply(summary)
 
 
 async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str, limit: int):
     db = DBManager.get_db(chat_id)
     query = f"""
-    SELECT m.id, m.date, u.first_name, m.content, COUNT(r.id) as reaction_count
+    SELECT m.date, u.first_name, m.content, COUNT(r.id) as reaction_count
     FROM messages m
     JOIN users u ON m.user_id = u.id
     LEFT JOIN reactions r ON m.id = r.message_id
@@ -1091,6 +1117,7 @@ async def get_user_info(event, db):
     # Query LLM
     query_llm = await get_query_llm(chat_id)
     answer = query_llm(prompt)
+    print(prompt)
 
     return answer
 
@@ -1104,17 +1131,24 @@ async def handle_user_info(event):
     await event.reply(response)
 
 
-async def _get_user(user_id: int, chat_id: int) -> User:
-    """Получите информацию о пользователе из Telegram и сохраните ее в базе данных."""
-    db = DBManager.get_db(chat_id)
+async def _get_user(event) -> db_User:
+    """Получите информацию о пользователе или канале из Telegram и сохраните ее в базе данных."""
+    db = DBManager.get_db(event.chat_id)
     try:
-        user = await client.get_entity(user_id)
-        db_user = User(
-            id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            tags="bot" if user.bot else "",
+        # Check if the sender is a channel or a chat
+        if isinstance(event.message.to_id, PeerChannel) or isinstance(event.message.to_id, PeerChat):
+            # It's a group or channel message
+            entity = await event.get_chat()
+        else:
+            # It's a user message
+            entity = await event.get_sender()
+
+        db_user = db_User(
+            id=entity.id,
+            username=entity.username,
+            first_name=getattr(entity, 'first_name', 'Канал'),
+            last_name=getattr(entity, 'last_name', None),
+            tags="bot" if getattr(entity, 'bot', False) else "",
             avatar=None  # Загрузка аватара здесь опциональна
         )
         db.insert_user(db_user)
@@ -1122,7 +1156,7 @@ async def _get_user(user_id: int, chat_id: int) -> User:
         return db_user
     except Exception as e:
         logging.error(f"Ошибка получения пользователя: {e}")
-        return User(id=user_id, username=str(user_id), first_name=str(user_id), last_name=None, tags="", avatar=None)
+        return db_User(id=event.sender_id, username=str(event.sender_id), first_name=str(event.sender_id), last_name=None, tags="", avatar=None)
 
 
 async def _process_media(message: Message) -> Media:
@@ -1179,7 +1213,6 @@ async def _process_reactions(message: Message, chat_id: int) -> None:
 @client.on(events.NewMessage)
 async def handler(event):
     await command_handler.handle_message(event)
-
 
 
 async def main():
