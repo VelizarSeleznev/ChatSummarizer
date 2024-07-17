@@ -1,15 +1,11 @@
-import asyncio
 import logging
 import os
-import sqlite3
 import re
 
 from telethon.tl.types import PeerChannel, PeerChat
-from telethon.tl.functions.messages import GetMessageReactionsListRequest
 from telethon.sync import TelegramClient
-from telethon import events, Button
-from datetime import datetime, timedelta
-import pandas as pd
+from telethon import events
+from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
@@ -21,10 +17,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import io
-from telethon.tl.types import InputFile
 from telethon.tl.types import DocumentAttributeFilename
 
-import requests  # сделано больше для того, чтобы использовать другие функции запроса к ллм
+import requests
 
 from db import DBManager, Message as DBMessage, Reaction, Media, User as db_User, Message
 
@@ -133,6 +128,8 @@ class CommandHandler:
 
     async def handle_message(self, event):
         sender_id = event.sender_id
+        if not sender_id:
+            sender_id = event.message.from_id
         message = event.message
 
         if message.text.startswith('/'):
@@ -149,6 +146,8 @@ class CommandHandler:
 
     async def cancel_command(self, event):
         sender_id = event.sender_id
+        if not sender_id:
+            sender_id = event.message.from_id
         if sender_id in self.user_states:
             del self.user_states[sender_id]
         if sender_id in self.user_contexts:
@@ -269,6 +268,8 @@ def save_chat_functions(chat_id, functions):
 
 async def handle_update_prompt(event, context):
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -295,6 +296,8 @@ async def handle_update_prompt(event, context):
 
 async def handle_update_limit(event, context):
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -328,6 +331,8 @@ async def handle_update_limit(event, context):
 
 async def handle_update_query_llm(event, context):
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -397,11 +402,15 @@ async def list_functions(event, context):
         f"- {name}" for name in chat_functions if name != 'current_function')
     await event.reply(function_list)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
 async def set_function(event, context):
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
         await event.reply("Операция отменена.")
@@ -516,6 +525,8 @@ async def messages_by_day(event, context):
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('messages_by_day.png')])
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -543,6 +554,8 @@ async def activity_by_hour(event, context):
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('activity_by_hour.png')])
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -565,6 +578,8 @@ async def message_length_distribution(event, context):
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('message_length_distribution.png')])
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -596,6 +611,8 @@ async def user_activity_comparison(event, context):
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_comparison.png')])
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -632,6 +649,8 @@ async def word_trend(event, context):
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename(f'word_trend_{word}.png')])
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -655,6 +674,8 @@ async def handle_ask(event, context):
         else:
             response = await ask_question(chat_id, question)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
     await event.reply(response)
@@ -744,6 +765,8 @@ async def list_prompts(event, context):
 Use /update_prompt to modify a prompt."""
     await event.reply(message)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -758,6 +781,8 @@ async def list_limits(event, context):
 Use /update_limit to modify a limit."""
     await event.reply(message)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -791,6 +816,8 @@ async def summarize(event, context):
     summary = query_llm(prompt)
     await event.reply(summary)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -832,6 +859,8 @@ async def stats(event, context):
 
     await event.reply(stats_message)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
@@ -930,6 +959,8 @@ async def handle_user_info(event, context):
     response = await get_user_info(event, db)
     await event.reply(response)
     sender_id = event.sender_id
+    if not sender_id:
+        sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
 
 
