@@ -4,39 +4,29 @@ import os
 import sqlite3
 import re
 
-import io
-import matplotlib.pyplot as plt
-from telethon.tl.types import InputPeerUser
-
-from telethon import TelegramClient, events
-from telethon.tl.types import Message, InputPeerUser
+from telethon.tl.types import PeerChannel, PeerChat
+from telethon.tl.functions.messages import GetMessageReactionsListRequest
+from telethon.sync import TelegramClient
 from telethon import events, Button
 from datetime import datetime, timedelta
 import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from telethon.tl.functions.messages import GetMessageReactionsListRequest
-from telethon.tl.types import User as TelegramUser
-from telethon.tl.types import Channel
-from telethon.tl.types import User as TelegramUser, Channel, PeerUser, PeerChannel
-from telethon.tl.types import InputPeerUser, InputPeerChannel
-from telethon.errors import UserIdInvalidError
-from telethon.tl.types import PeerChannel, PeerChat
-from telethon.tl.types import User, Chat, Channel
-from telethon.sync import TelegramClient
+from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 from enum import Enum, auto
 from typing import Dict, Callable, Any
 import ast
 import json
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import io
+from telethon.tl.types import InputFile
+from telethon.tl.types import DocumentAttributeFilename
 
 import requests  # сделано больше для того, чтобы использовать другие функции запроса к ллм
 
-from db import DBManager, Message as DBMessage, Reaction, Media
-from db import DBManager, User as db_User, Message
-from plotting_scripts import messages_by_day, activity_by_hour, message_length_distribution, user_activity_comparison, \
-    word_trend
+from db import DBManager, Message as DBMessage, Reaction, Media, User as db_User, Message
 
 # Настройте логирование
 logging.basicConfig(level=logging.INFO)
@@ -78,9 +68,6 @@ os.makedirs(CHAT_FUNCTIONS_DIR, exist_ok=True)
 # Dictionary to store users who are in the process of updating query_gemini
 updating_users = {}
 
-# Dictionary to store chat-specific query_llm functions
-chat_query_llm = {}
-
 # Путь к базе данных SQLite
 DB_PATH = 'data.sqlite'
 
@@ -106,8 +93,10 @@ generation_config = GenerationConfig(
     # top_p=0.95,
     # max_output_tokens=1024,
 )
-conn = sqlite3.connect('data.sqlite')
-cursor = conn.cursor()
+
+
+# conn = sqlite3.connect('data.sqlite')
+# cursor = conn.cursor()
 
 
 def load_text_data(filepath):
@@ -172,12 +161,6 @@ class CommandHandler:
         if sender_id in self.user_contexts:
             del self.user_contexts[sender_id]
 
-    def reset_user_state(self, sender_id: int):
-        if sender_id in self.user_states:
-            del self.user_states[sender_id]
-        if sender_id in self.user_contexts:
-            del self.user_contexts[sender_id]
-
 
 # Initialize the command handler
 command_handler = CommandHandler()
@@ -220,40 +203,6 @@ def query_claude(prompt):
         return response.json()['content'][0]['text']
     else:
         return f"Error: {response.status_code}, {response.text}"
-
-
-def check_format(string):
-    # Регулярное выражение для основного формата
-    main_pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [a-zA-Z0-9_]+: .+$'
-
-    # Регулярное выражение для поиска смайликов (эмодзи)
-    emoji_pattern = re.compile(
-        "["
-        u"\U0001F600-\U0001F64F"  # Emoticons
-        u"\U0001F300-\U0001F5FF"  # Symbols & Pictographs
-        u"\U0001F680-\U0001F6FF"  # Transport & Map Symbols
-        u"\U0001F700-\U0001F77F"  # Alchemical Symbols
-        u"\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
-        u"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
-        u"\U0001F900-\U0001F9FF"  # Supplemental Symbols & Pictographs
-        u"\U0001FA00-\U0001FA6F"  # Chess Symbols
-        u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
-        u"\U00002702-\U000027B0"  # Dingbats
-        u"\U000024C2-\U0001F251"
-        "]+", flags=re.UNICODE)
-
-    # Регулярное выражение для поиска ссылок
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
-
-    if not re.match(main_pattern, string):
-        return False
-    if emoji_pattern.search(string):
-        return False
-    if url_pattern.search(string):
-        return False
-
-    return True
 
 
 def get_chat_functions_file(chat_id):
@@ -344,63 +293,6 @@ async def handle_update_prompt(event, context):
         command_handler.reset_user_state(sender_id)
 
 
-command_handler.register_command('update_prompt', handle_update_prompt)
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'prompt_naming'))
-async def handle_prompt_name(event):
-    sender = await event.get_sender()
-    if sender.id not in ongoing_dialogues:
-        return
-    chat_id = updating_users[sender.id]['chat_id']
-    prompt_name = event.message.text.strip().upper()
-
-    if prompt_name == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-
-    if prompt_name == '/UPDATE_PROMPT':
-        return
-
-    chat_prompts = load_chat_prompts(chat_id)
-    if prompt_name not in chat_prompts:
-        await event.reply(f"Промпт '{prompt_name}' не найден. Пожалуйста, выберите правильное имя промпта.")
-        return
-
-    updating_users[sender.id]['prompt_name'] = prompt_name
-    updating_users[sender.id]['state'] = 'waiting_for_prompt'
-    await event.reply(f"Пожалуйста, пришлите новое содержимое для промпта '{prompt_name}'.")
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'waiting_for_prompt'))
-async def handle_new_prompt(event):
-    sender = await event.get_sender()
-    if sender.id not in ongoing_dialogues:
-        return
-    if event.message.text in ['ASK_PROMPT', 'SUMMARIZE_PROMPT']:
-        return
-    if event.message.text == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-    chat_id = updating_users[sender.id]['chat_id']
-    prompt_name = updating_users[sender.id]['prompt_name']
-    new_prompt = event.message.text
-
-    chat_prompts = load_chat_prompts(chat_id)
-    chat_prompts[prompt_name] = new_prompt
-    save_chat_prompts(chat_id, chat_prompts)
-
-    await event.reply(f"Промпт '{prompt_name}' был успешно обновлен для этого чата.")
-    ongoing_dialogues.remove(sender.id)
-    del updating_users[sender.id]
-
-
 async def handle_update_limit(event, context):
     sender_id = event.sender_id
 
@@ -432,79 +324,6 @@ async def handle_update_limit(event, context):
             await event.reply("Invalid input. Please enter a positive integer.")
         finally:
             command_handler.reset_user_state(sender_id)
-
-
-command_handler.register_command('update_limit', handle_update_limit)
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'limit_naming'))
-async def handle_limit_name(event):
-    sender = await event.get_sender()
-    chat_id = updating_users[sender.id]['chat_id']
-    limit_name = event.message.text.strip().lower()
-
-    if limit_name == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-
-    if limit_name == '/update_limit':
-        return
-
-    chat_limits = load_chat_limits(chat_id)
-    if limit_name not in chat_limits:
-        await event.reply(f"Лимит '{limit_name}' не найден. Пожалуйста, выберите правильное имя лимита.")
-        return
-
-    updating_users[sender.id]['limit_name'] = limit_name
-    updating_users[sender.id]['state'] = 'waiting_for_limit'
-    await event.reply(
-        f"Пожалуйста, пришлите новое значение для лимита '{limit_name}' (должно быть целое положительное число).")
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'waiting_for_limit'))
-async def handle_new_limit(event):
-    sender = await event.get_sender()
-    if sender.id not in ongoing_dialogues:
-        return
-    if event.message.text == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-    chat_id = updating_users[sender.id]['chat_id']
-    limit_name = updating_users[sender.id]['limit_name']
-
-    try:
-        new_limit = int(event.message.text)
-        if new_limit <= 0:
-            raise ValueError
-    except ValueError:
-        await event.reply("Неверный ввод. Пожалуйста, введите целое положительное число.")
-        return
-
-    chat_limits = load_chat_limits(chat_id)
-    chat_limits[limit_name] = new_limit
-    save_chat_limits(chat_id, chat_limits)
-
-    await event.reply(f"Лимит '{limit_name}' был успешно обновлен до {new_limit} для этого чата.")
-    ongoing_dialogues.remove(sender.id)
-    del updating_users[sender.id]
-
-
-@client.on(events.NewMessage(pattern='/cancel'))
-async def cancel_dialogue(event):
-    sender_id = event.sender_id
-    if sender_id in ongoing_dialogues:
-        ongoing_dialogues.remove(sender_id)
-        if sender_id in updating_users:
-            del updating_users[sender_id]
-        # await event.reply("Current operation has been cancelled.")
-    # else:
-    # await event.reply("There's no ongoing operation to cancel.")
 
 
 async def handle_update_query_llm(event, context):
@@ -542,72 +361,6 @@ async def handle_update_query_llm(event, context):
             command_handler.reset_user_state(sender_id)
 
 
-command_handler.register_command('update_query_llm', handle_update_query_llm)
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'naming'))
-async def handle_function_name(event):
-    sender = await event.get_sender()
-    chat_id = updating_users[sender.id]['chat_id']
-    name = event.message.text.strip()
-
-    if sender.id not in ongoing_dialogues:
-        return
-
-    if name == '/update_query_llm':
-        return
-    if name == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-
-    if name.lower() == 'default':
-        await event.reply("Нельзя использовать 'default' в качестве имени функции. Пожалуйста, выберите другое имя:")
-        return
-
-    chat_functions = load_chat_functions(chat_id)
-    if name in chat_functions:
-        await event.reply("Это имя уже используется. Пожалуйста, выберите другое имя:")
-        return
-
-    updating_users[sender.id]['name'] = name
-    updating_users[sender.id]['state'] = 'waiting_for_file'
-    await event.reply("Пожалуйста, отправьте .txt файл с кодом новой функции query_llm.")
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.document and e.sender_id in updating_users and updating_users[e.sender_id][
-        'state'] == 'waiting_for_file'))
-async def handle_document(event):
-    sender = await event.get_sender()
-    if sender.id not in ongoing_dialogues:
-        return
-    chat_id = updating_users[sender.id]['chat_id']
-    name = updating_users[sender.id]['name']
-
-    if event.message.text == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-
-    if not event.document.attributes[-1].file_name.endswith('.txt'):
-        await event.reply("Пожалуйста, отправьте .txt файл.")
-        return
-
-    try:
-        content = await client.download_media(event.document, file=bytes)
-        new_code = content.decode('utf-8')
-        await update_query_llm(event, new_code, chat_id, name)
-    except Exception as e:
-        await event.reply(f"Ошибка при обработке файла: {e}")
-    finally:
-        del updating_users[sender.id]
-        ongoing_dialogues.remove(sender.id)
-
-
 async def update_query_llm(event, new_code, chat_id, name):
     try:
         ast.parse(new_code)
@@ -637,25 +390,37 @@ async def update_query_llm(event, new_code, chat_id, name):
     await change_active_function(event.chat_id, name)
 
 
-@client.on(events.NewMessage(pattern='/list_functions'))
-async def list_functions(event):
-    chat_id = event.chat_id
+async def list_functions(event, context):
+    chat_id = context['chat_id']
     chat_functions = load_chat_functions(chat_id)
     function_list = "Доступные функции:\n- default (встроенная)\n" + "\n".join(
         f"- {name}" for name in chat_functions if name != 'current_function')
     await event.reply(function_list)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/set_function'))
-async def set_function(event):
-    sender = await event.get_sender()
-    ongoing_dialogues.add(sender.id)
-    chat_id = event.chat_id
-    chat_functions = load_chat_functions(chat_id)
-    function_list = "Выберите функцию для использования:\n0. default (встроенная)\n" + "\n".join(
-        f"{i + 1}. {name}" for i, name in enumerate(chat_functions) if name != 'current_function')
-    await event.reply(function_list + "\n\nОтветьте номером функции, которую вы хотите использовать.")
-    updating_users[event.sender_id] = {'chat_id': chat_id, 'state': 'selecting_function'}
+async def set_function(event, context):
+    sender_id = event.sender_id
+    if event.message.text == '/cancel':
+        command_handler.reset_user_state(sender_id)
+        await event.reply("Операция отменена.")
+        return
+    if 'step' not in context:
+        context['step'] = 'selecting_function'
+        chat_id = context['chat_id']
+        chat_functions = load_chat_functions(chat_id)
+        function_list = "Выберите функцию для использования:\n0. default (встроенная)\n" + "\n".join(
+            f"{i + 1}. {name}" for i, name in enumerate(chat_functions) if name != 'current_function')
+        await event.reply(function_list + "\n\nОтветьте именем функции, которую вы хотите использовать.")
+    elif context['step'] == 'selecting_function':
+        chat_id = context['chat_id']
+        function_name = event.message.text.strip()
+        if await change_active_function(chat_id, function_name):
+            await event.reply(f"Успешно установлена текущая функция '{function_name}'.")
+            command_handler.reset_user_state(sender_id)
+        else:
+            await event.reply('Выберите верное имя функции или напишите /cancel')
 
 
 async def change_active_function(chat_id, function_name):
@@ -669,39 +434,6 @@ async def change_active_function(chat_id, function_name):
             f.truncate()
         return True
     return False
-
-
-@client.on(events.NewMessage(
-    func=lambda e: e.sender_id in updating_users and updating_users[e.sender_id]['state'] == 'selecting_function'))
-async def handle_function_selection(event):
-    sender = await event.get_sender()
-    chat_id = updating_users[sender.id]['chat_id']
-    chat_functions = load_chat_functions(chat_id)
-    if sender.id not in ongoing_dialogues:
-        return
-    if event.message.text == '/cancel':
-        ongoing_dialogues.remove(sender.id)
-        del updating_users[sender.id]
-        await event.reply("Действие отменено.")
-        return
-    if event.message.text == '/set_function':
-        return
-    try:
-        selection = int(event.message.text.strip()) - 1
-        if selection == -1:
-            function_name = 'default'
-        else:
-            function_name = list(chat_functions.keys())[selection]
-
-        if await change_active_function(chat_id, function_name):
-            await event.reply(f"Успешно установлена текущая функция '{function_name}'.")
-        else:
-            await event.reply("Не удалось установить выбранную функцию. Пожалуйста, попробуйте еще раз.")
-    except (ValueError, IndexError):
-        await event.reply("Неверный выбор. Пожалуйста, попробуйте еще раз.")
-    finally:
-        del updating_users[sender.id]
-        ongoing_dialogues.remove(sender.id)
 
 
 async def get_query_llm(chat_id):
@@ -723,48 +455,8 @@ async def get_query_llm(chat_id):
             return default_query_llm
 
 
-# Add a new command to switch between Claude and Gemini
-@client.on(events.NewMessage(pattern='/switch_llm'))
-async def switch_llm(event):
-    chat_id = event.chat_id
-    chat_functions = load_chat_functions(chat_id)
-    current_function = chat_functions.get('current_function', 'claude')
-
-    new_function = 'gemini' if current_function == 'claude' else 'claude'
-    chat_functions['current_function'] = new_function
-
-    with open(get_chat_functions_file(chat_id), 'w') as f:
-        json.dump(chat_functions, f)
-
-    await event.reply(f"Switched to {new_function.capitalize()} for LLM queries.")
-
-
-async def get_chat_messages(chat_id: int, date: str):
-    db = DBManager.get_db(chat_id)
-    query = f"""
-    SELECT m.id, m.date, u.first_name, m.content, COUNT(r.id) as reaction_count
-    FROM messages m
-    JOIN users u ON m.user_id = u.id
-    LEFT JOIN reactions r ON m.id = r.message_id
-    WHERE DATE(m.date) = '{date}'
-    GROUP BY m.id
-    ORDER BY m.date
-    LIMIT 5000
-    """
-
-    df = pd.read_sql_query(query, db.conn)
-    return df
-
-
 async def get_last_messages(chat_id: int, limit: int):
     db = DBManager.get_db(chat_id)
-    # query = f"""
-    # SELECT m.id, m.date, u.first_name, m.content
-    # FROM messages m
-    # JOIN users u ON m.user_id = u.id
-    # ORDER BY m.date DESC
-    # LIMIT {limit}
-    # """
     query = f"""
 SELECT 
     messages.date, 
@@ -791,45 +483,159 @@ async def ask_question(chat_id: int, question: str):
         return "В истории чата не найдено ни одного сообщения."
 
     prompt = chat_prompts['ASK_PROMPT'].format(question=question)
-    for _, row in df.iterrows():
-        string = f"{row['date']} - {row['first_name']}: {row['content']}\n"
-        if check_format(string):
-            prompt += string
     data_as_string = df.to_string(index=False)
     prompt += f"\n {data_as_string}"
     query_llm = await get_query_llm(chat_id)
     answer = query_llm(prompt)
-    print(prompt)
     return answer
 
 
-@client.on(events.NewMessage(pattern='/messages_by_day'))
-async def _messages_by_day(event):
-    await messages_by_day(event, client)
+async def messages_by_day(event, context):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+    query = """
+    SELECT DATE(date) as date, COUNT(*) as count
+    FROM messages
+    GROUP BY DATE(date)
+    ORDER BY date
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['date'], df['count'])
+    plt.title('Количество сообщений по дням')
+    plt.xlabel('Дата')
+    plt.ylabel('Количество сообщений')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('messages_by_day.png')])
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/activity_by_hour'))
-async def _activity_by_hour(event):
-    await activity_by_hour(event, client)
+async def activity_by_hour(event, context):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+    query = """
+    SELECT strftime('%H', date) as hour, COUNT(*) as count
+    FROM messages
+    GROUP BY hour
+    ORDER BY hour
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x='hour', y='count', data=df)
+    plt.title('Активность по времени суток')
+    plt.xlabel('Час')
+    plt.ylabel('Количество сообщений')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('activity_by_hour.png')])
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/message_length'))
-async def _message_length_distribution(event):
-    await message_length_distribution(event, client)
+async def message_length_distribution(event, context):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+    query = "SELECT length(content) as length FROM messages"
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    sns.histplot(df['length'], kde=True)
+    plt.title('Распределение длины сообщений')
+    plt.xlabel('Длина сообщения')
+    plt.ylabel('Частота')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('message_length_distribution.png')])
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/user_activity'))
-async def _user_activity_comparison(event):
-    await user_activity_comparison(event, client)
+async def user_activity_comparison(event, context):
+    chat_id = event.chat_id
+    db = DBManager.get_db(chat_id)
+    query = """
+    SELECT u.username, COUNT(*) as message_count
+    FROM messages m
+    JOIN users u ON m.user_id = u.id
+    GROUP BY u.id
+    ORDER BY message_count DESC
+    LIMIT 10
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x='username', y='message_count', data=df)
+    plt.title('Сравнение активности пользователей')
+    plt.xlabel('Пользователь')
+    plt.ylabel('Количество сообщений')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_comparison.png')])
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/word_trend'))
-async def _word_trend(event):
-    await word_trend(event, client)
+async def word_trend(event, context):
+    chat_id = event.chat_id
+    word = event.raw_text.split(maxsplit=1)[1] if len(event.raw_text.split()) > 1 else None
+
+    if not word:
+        await event.reply("Пожалуйста, укажите слово после команды /word_trend")
+        return
+
+    db = DBManager.get_db(chat_id)
+    query = f"""
+    SELECT DATE(date) as date, 
+        SUM(CASE WHEN content LIKE '%{word}%' THEN 1 ELSE 0 END) as count
+    FROM messages
+    GROUP BY DATE(date)
+    ORDER BY date
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['date'], df['count'])
+    plt.title(f'Тренд использования слова "{word}"')
+    plt.xlabel('Дата')
+    plt.ylabel('Количество упоминаний')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename(f'word_trend_{word}.png')])
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern=r'/ask'))
-async def handle_ask(event):
+async def handle_ask(event, context):
     chat_id = event.chat_id
     message = event.message
     db = DBManager.get_db(chat_id)
@@ -848,6 +654,8 @@ async def handle_ask(event):
             response = "Please provide a question after the /ask command."
         else:
             response = await ask_question(chat_id, question)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
     await event.reply(response)
 
@@ -855,16 +663,14 @@ async def handle_ask(event):
 @client.on(events.NewMessage)
 async def handler(event: events.NewMessage.Event):
     """Обработчик новых сообщений."""
-    message: Message = event.message
+    await command_handler.handle_message(event)
+    message = event.message
     chat_id = event.chat_id
 
     db = DBManager.get_db(chat_id)
 
     # Получите информацию о пользователе
-    user = await _get_user(event)
-
-    # Обработайте медиа-файлы (если есть)
-    media = await _process_media(message)
+    user = await get_user(event)
 
     # Создайте объект сообщения для базы данных
     db_message = DBMessage(
@@ -875,15 +681,12 @@ async def handler(event: events.NewMessage.Event):
         content=message.raw_text,
         reply_to=message.reply_to_msg_id,
         user=user,
-        media=media
+        media=None
     )
 
     # Вставьте сообщение в базу данных
     db.insert_message(db_message)
     db.commit()
-
-    # Обработайте реакции на сообщение
-    await _process_reactions(message, chat_id)
 
 
 @client.on(events.NewMessage(pattern='/start'))
@@ -930,8 +733,7 @@ async def update_limit_help(event):
     await event.reply(help_message)
 
 
-@client.on(events.NewMessage(pattern='/list_prompts'))
-async def list_prompts(event):
+async def list_prompts(event, context):
     chat_id = event.chat_id
     chat_prompts = load_chat_prompts(chat_id)
     prompts_list = "\n".join(f"- {name}" for name in chat_prompts.keys())
@@ -941,10 +743,11 @@ async def list_prompts(event):
 
 Use /update_prompt to modify a prompt."""
     await event.reply(message)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/list_limits'))
-async def list_limits(event):
+async def list_limits(event, context):
     chat_id = event.chat_id
     chat_limits = load_chat_limits(chat_id)
     limits_list = "\n".join(f"- {name}: {value}" for name, value in chat_limits.items())
@@ -954,10 +757,11 @@ async def list_limits(event):
 
 Use /update_limit to modify a limit."""
     await event.reply(message)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-@client.on(events.NewMessage(pattern='/summarize'))
-async def summarize(event):
+async def summarize(event, context):
     chat_id = event.chat_id
     chat_prompts = load_chat_prompts(chat_id)
     chat_limits = load_chat_limits(chat_id)
@@ -982,15 +786,12 @@ async def summarize(event):
     prompt = chat_prompts['SUMMARIZE_PROMPT']
 
     prompt += df.to_string(index=False)
-    # for _, row in df.iterrows():
-    #     string = f"{row['date']} - {row['username']}: {row['content']}\n"
-    #     if check_format(string):
-    #         prompt += string
 
     query_llm = await get_query_llm(chat_id)
     summary = query_llm(prompt)
-    print(prompt)
     await event.reply(summary)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
 async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_date: str, limit: int):
@@ -1010,8 +811,7 @@ async def get_chat_messages_between_dates(chat_id: int, start_date: str, end_dat
     return df
 
 
-@client.on(events.NewMessage(pattern='/stats'))
-async def stats(event):
+async def stats(event, context):
     chat_id = event.chat_id
     db = DBManager.get_db(chat_id)
 
@@ -1031,6 +831,8 @@ async def stats(event):
     stats_message += f"Total Reactions: {total_reactions}"
 
     await event.reply(stats_message)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
 async def get_user_info(event, db):
@@ -1117,21 +919,21 @@ async def get_user_info(event, db):
     # Query LLM
     query_llm = await get_query_llm(chat_id)
     answer = query_llm(prompt)
-    print(prompt)
 
     return answer
 
 
-@client.on(events.NewMessage(pattern='/user_info'))
-async def handle_user_info(event):
+async def handle_user_info(event, context):
     chat_id = event.chat_id
     db = DBManager.get_db(chat_id)
 
     response = await get_user_info(event, db)
     await event.reply(response)
+    sender_id = event.sender_id
+    command_handler.reset_user_state(sender_id)
 
 
-async def _get_user(event) -> db_User:
+async def get_user(event) -> db_User:
     """Получите информацию о пользователе или канале из Telegram и сохраните ее в базе данных."""
     db = DBManager.get_db(event.chat_id)
     try:
@@ -1156,71 +958,34 @@ async def _get_user(event) -> db_User:
         return db_user
     except Exception as e:
         logging.error(f"Ошибка получения пользователя: {e}")
-        return db_User(id=event.sender_id, username=str(event.sender_id), first_name=str(event.sender_id), last_name=None, tags="", avatar=None)
+        return db_User(id=event.sender_id, username=str(event.sender_id), first_name=str(event.sender_id),
+                       last_name=None, tags="", avatar=None)
 
 
-async def _process_media(message: Message) -> Media:
-    """Обработайте медиа-файлы, прикрепленные к сообщению."""
-    if message.media:
-        # Здесь вы можете добавить логику для загрузки и обработки
-        # медиа-файлов, таких как фотографии, видео, документы и т. д.
-        # и вернуть объект Media с информацией о медиа-файле.
-        pass
-    return None
-
-
-async def _process_reactions(message: Message, chat_id: int) -> None:
-    """Обработайте реакции на сообщение."""
-    db = DBManager.get_db(chat_id)
-    if message.reactions is not None and message.reactions.results:
-        try:
-            # Используем стандартную функцию GetMessageReactionsRequest
-            reactions = await client(GetMessageReactionsListRequest(
-                peer=message.peer_id,
-                id=message.id,
-                limit=1000  # Измените лимит при необходимости
-            ))
-
-            for reaction in reactions.reactions:
-                try:
-                    user = await _get_user(reaction.peer_id.user_id, chat_id)
-                    reaction_type = ""
-                    reaction_content = ""
-                    if reaction.reaction.emoticon:
-                        reaction_type = 'emoticon'
-                        reaction_content = reaction.reaction.emoticon
-                    else:
-                        reaction_type = 'custom'
-                        reaction_content = str(reaction.reaction)
-                    db_reaction = Reaction(
-                        id='',
-                        date=message.date,
-                        message_id=message.id,
-                        user_id=user.id,
-                        type=reaction_type,
-                        content=reaction_content
-                    )
-                    db.insert_reaction(db_reaction)
-                except AttributeError:
-                    logging.warning(
-                        "Skipping reaction: could not get user or reaction info.")
-            db.commit()
-        except Exception as e:
-            logging.error(
-                f"Error fetching or processing reactions: {e}")
-
-
-@client.on(events.NewMessage)
-async def handler(event):
-    await command_handler.handle_message(event)
+def initialize_functions():
+    command_handler.register_command('update_prompt', handle_update_prompt)
+    command_handler.register_command('update_limit', handle_update_limit)
+    command_handler.register_command('update_query_llm', handle_update_query_llm)
+    command_handler.register_command('list_functions', list_functions)
+    command_handler.register_command('set_function', set_function)
+    command_handler.register_command('messages_by_day', messages_by_day)
+    command_handler.register_command('activity_by_hour', activity_by_hour)
+    command_handler.register_command('message_length', message_length_distribution)
+    command_handler.register_command('user_activity', user_activity_comparison)
+    command_handler.register_command('word_trend', word_trend)
+    command_handler.register_command('ask', handle_ask)
+    command_handler.register_command('list_prompts', list_prompts)
+    command_handler.register_command('list_limits', list_limits)
+    command_handler.register_command('summarize', summarize)
+    command_handler.register_command('stats', stats)
+    command_handler.register_command('user_info', handle_user_info)
+    command_handler.register_command('update_prompt', handle_update_prompt)
 
 
 async def main():
     """Запустите бота и ждите новых сообщений."""
+    initialize_functions()
     logging.info("Бот запущен!")
-    command_handler.register_command('update_query_llm', handle_update_query_llm)
-    command_handler.register_command('update_prompt', handle_update_prompt)
-    command_handler.register_command('update_limit', handle_update_limit)
     await client.run_until_disconnected()
 
 
