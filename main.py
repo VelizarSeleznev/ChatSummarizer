@@ -181,7 +181,7 @@ def query_gemini(prompt):
         return response.text.strip()
     except Exception as e:
         logging.error(f"An error occurred while querying the LLM: {e}")
-        return "An error occurred. Please try again later."
+        return e
 
 
 def query_claude(prompt):
@@ -448,12 +448,10 @@ async def change_active_function(chat_id, function_name):
 
 async def get_query_llm(chat_id):
     chat_functions = load_chat_functions(chat_id)
-    current_function = chat_functions.get('current_function', 'claude')
+    current_function = chat_functions.get('current_function', 'gemini')
 
-    if current_function == 'claude':
+    if current_function == 'gemini':
         return default_query_llm
-    elif current_function == 'gemini':
-        return query_gemini
     else:
         function_code = chat_functions.get(current_function)
         if function_code:
@@ -680,8 +678,26 @@ async def handle_ask(event, context):
         # If it's not a command, don't look for username
         username_match = None
 
-    if replied_to or username_match:
-        # Use user_info functionality
+    if replied_to:
+        # Check if the replied message contains a link
+        urls = re.findall(r'(https?://\S+)', replied_to.text)
+        if urls:
+            url = urls[0]
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                content = response.text
+                prompt = f"{url} what is this website about?"
+                query_llm = await get_query_llm(chat_id)
+                summary = query_llm(prompt)
+                response = f"Summary of the link content:\n{summary}"
+            except requests.RequestException as e:
+                response = f"Failed to fetch the content from the link: {e}"
+        else:
+            # Use user_info functionality if no link is found
+            response = await get_user_info(event, db)
+    elif username_match:
+        # Use user_info functionality if username is mentioned
         response = await get_user_info(event, db)
     else:
         # Use original ask functionality
