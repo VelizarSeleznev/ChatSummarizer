@@ -132,8 +132,9 @@ class CommandHandler:
             sender_id = event.message.from_id
         message = event.message
 
-        if message.text.startswith('/'):
-            command = message.text.split()[0][1:]
+        command_match = re.match(r'/(\w+)(@\w+)?', message.text)
+        if command_match:
+            command = command_match.group(1)
             if command == 'cancel':
                 await self.cancel_command(event)
             elif command in self.command_callbacks:
@@ -659,20 +660,37 @@ async def handle_ask(event, context):
     message = event.message
     db = DBManager.get_db(chat_id)
 
-    # Check if there's a reply or a user mention
+    # Check if there's a reply
     replied_to = await message.get_reply_message()
-    username_match = re.search(r'@(\w+)', message.text)
+
+    # Extract the command and potential bot name
+    command_match = re.match(r'^/(\w+)(@\w+)?', message.text)
+
+    if command_match:
+        command = command_match.group(1)
+        bot_name = command_match.group(2)
+
+        if bot_name:
+            # If bot name is present, don't look for username
+            username_match = None
+        else:
+            # Look for username in the rest of the message
+            username_match = re.search(r'@(\w+)', message.text[len(command_match.group(0)):])
+    else:
+        # If it's not a command, don't look for username
+        username_match = None
 
     if replied_to or username_match:
         # Use user_info functionality
         response = await get_user_info(event, db)
     else:
         # Use original ask functionality
-        question = re.sub(r'^/ask(@\w+)?(\s+)?', '', message.text).strip()
+        question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
         if not question:
             response = "Please provide a question after the /ask command."
         else:
             response = await ask_question(chat_id, question)
+
     sender_id = event.sender_id
     if not sender_id:
         sender_id = event.message.from_id
@@ -733,6 +751,12 @@ async def summarize_help(event):
 @client.on(events.NewMessage(pattern='/ask --help'))
 async def ask_help(event):
     help_message = help_texts['ASK_HELP']
+    await event.reply(help_message)
+
+
+@client.on(events.NewMessage(pattern='/user_info --help'))
+async def user_info_help(event):
+    help_message = help_texts['USER_INFO_HELP']
     await event.reply(help_message)
 
 
