@@ -22,3 +22,4 @@
 
 [SUMMARIZE_MESSAGE_PROMPT]
 Сделай саммари сообщения ниже
+

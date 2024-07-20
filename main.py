@@ -18,6 +18,8 @@ import seaborn as sns
 import pandas as pd
 import io
 from telethon.tl.types import DocumentAttributeFilename
+from telethon.tl.types import MessageMediaPhoto
+from PIL import Image
 
 import requests
 
@@ -72,7 +74,7 @@ client = TelegramClient('bot_session', API_ID, API_HASH).start(
 
 # --- Google Gemini Configuration ---
 genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('models/gemini-pro')
+model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -171,10 +173,14 @@ def default_query_llm(prompt):
     return query_gemini(prompt)
 
 
-def query_gemini(prompt):
+def query_gemini(prompt, images=None):
     try:
+        content = [prompt]
+        if images:
+            content.extend(images)
+
         response = model.generate_content(
-            prompt,
+            content,
             safety_settings=safety_settings,
             generation_config=generation_config
         )
@@ -664,6 +670,17 @@ async def handle_ask(event, context):
     # Extract the command and potential bot name
     command_match = re.match(r'^/(\w+)(@\w+)?', message.text)
 
+    images = []
+    if message.media and isinstance(message.media, MessageMediaPhoto):
+        image = await message.download_media(file=bytes)
+        pil_image = Image.open(io.BytesIO(image))
+        images.append(pil_image)
+
+    if replied_to and replied_to.media and isinstance(replied_to.media, MessageMediaPhoto):
+        replied_image = await replied_to.download_media(file=bytes)
+        pil_replied_image = Image.open(io.BytesIO(replied_image))
+        images.append(pil_replied_image)
+
     if command_match:
         command = command_match.group(1)
         bot_name = command_match.group(2)
@@ -684,15 +701,24 @@ async def handle_ask(event, context):
         if urls:
             url = urls[0]
             try:
-                response = requests.get(url)
-                response.raise_for_status()
-                content = response.text
-                prompt = f"{content} \nКратко перескажи про что тут написано"
+                question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
+                if question:
+                    prompt = f"{url} \nКратко перескажи про что написано по этой ссылке и ответь на вопрос {question}"
+                else:
+                    prompt = f"{url} \nКратко перескажи про что написано по этой ссылке"
                 query_llm = await get_query_llm(chat_id)
                 summary = query_llm(prompt)
                 response = f"{summary}"
             except requests.RequestException as e:
                 response = f"Failed to fetch the content from the link: {e}"
+        elif images:
+            question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
+            if question:
+                question += "\n\nПроанализируй прикрепленные изображения и ответь на вопрос"
+            else:
+                question = "Проанализируй прикрепленные изображения"
+            response = query_gemini(question, images=images)
+
         else:
             # Use user_info functionality if no link is found
             response = await get_user_info(event, db)
@@ -702,10 +728,20 @@ async def handle_ask(event, context):
     else:
         # Use original ask functionality
         question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
-        if not question:
-            response = "Please provide a question after the /ask command."
+        if not question and not images:
+            response = "Please provide a question after the /ask command or attach an image."
         else:
-            response = await ask_question(chat_id, question)
+            if images:
+                if question:
+                    question += "\n\nPlease analyze the attached image(s) in your response."
+                else:
+                    question = "Please analyze the attached image(s)."
+
+            query_llm = await get_query_llm(chat_id)
+            if query_llm.__name__ == 'query_gemini':
+                response = query_gemini(question, images=images)
+            else:
+                response = query_llm(question)
 
     sender_id = event.sender_id
     if not sender_id:
@@ -837,16 +873,13 @@ async def summarize(event, context):
     replied_to = await event.message.get_reply_message()
 
     if replied_to:
-        # Summarize the replied message
-        logging.info('/summarize -> есть ответ на сообщение')
-        prompt = chat_prompts['SUMMARIZE_MESSAGE_PROMPT']
+        prompt = prompts['SUMMARIZE_MESSAGE_PROMPT']
         prompt += f"\n{replied_to.text}"
         query_llm = await get_query_llm(chat_id)
         summary = query_llm(prompt)
         print(summary)
         await event.reply(summary)
     else:
-        logging.info('/summarize -> нет ответа на сообщение')
         if len(dates) == 2:
             start_date = dates[0]
             end_date = dates[1]
@@ -867,7 +900,6 @@ async def summarize(event, context):
 
         query_llm = await get_query_llm(chat_id)
         summary = query_llm(prompt)
-        print(summary)
         await event.reply(summary)
 
     sender_id = event.sender_id
