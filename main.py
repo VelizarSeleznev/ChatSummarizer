@@ -181,7 +181,7 @@ def query_gemini(prompt):
         return response.text.strip()
     except Exception as e:
         logging.error(f"An error occurred while querying the LLM: {e}")
-        return e
+        return f"произошла ошибка {e}"
 
 
 def query_claude(prompt):
@@ -448,9 +448,9 @@ async def change_active_function(chat_id, function_name):
 
 async def get_query_llm(chat_id):
     chat_functions = load_chat_functions(chat_id)
-    current_function = chat_functions.get('current_function', 'gemini')
+    current_function = chat_functions.get('current_function', 'claude')
 
-    if current_function == 'gemini':
+    if current_function == 'claude':
         return default_query_llm
     else:
         function_code = chat_functions.get(current_function)
@@ -687,10 +687,10 @@ async def handle_ask(event, context):
                 response = requests.get(url)
                 response.raise_for_status()
                 content = response.text
-                prompt = f"{url} what is this website about?"
+                prompt = f"{content} \nКратко перескажи про что тут написано"
                 query_llm = await get_query_llm(chat_id)
                 summary = query_llm(prompt)
-                response = f"Summary of the link content:\n{summary}"
+                response = f"{summary}"
             except requests.RequestException as e:
                 response = f"Failed to fetch the content from the link: {e}"
         else:
@@ -833,28 +833,43 @@ async def summarize(event, context):
     date_pattern = r'\d{4}-\d{2}-\d{2}'
     dates = re.findall(date_pattern, event.message.text)
 
-    if len(dates) == 2:
-        start_date = dates[0]
-        end_date = dates[1]
-    elif len(dates) == 1:
-        start_date = end_date = dates[0]
+    # Check if the message is a reply
+    replied_to = await event.message.get_reply_message()
+
+    if replied_to:
+        # Summarize the replied message
+        logging.info('/summarize -> есть ответ на сообщение')
+        prompt = chat_prompts['SUMMARIZE_MESSAGE_PROMPT']
+        prompt += f"\n{replied_to.text}"
+        query_llm = await get_query_llm(chat_id)
+        summary = query_llm(prompt)
+        print(summary)
+        await event.reply(summary)
     else:
-        current_date = datetime.now().date()
-        start_date = end_date = current_date
+        logging.info('/summarize -> нет ответа на сообщение')
+        if len(dates) == 2:
+            start_date = dates[0]
+            end_date = dates[1]
+        elif len(dates) == 1:
+            start_date = end_date = dates[0]
+        else:
+            current_date = datetime.now().date()
+            start_date = end_date = current_date
 
-    df = await get_chat_messages_between_dates(chat_id, start_date, end_date, chat_limits['summarize_limit'])
+        df = await get_chat_messages_between_dates(chat_id, start_date, end_date, chat_limits['summarize_limit'])
 
-    if df.empty:
-        await event.reply("Не найдено ни одного сообщения в указанном диапазоне времени.")
-        return
+        if df.empty:
+            await event.reply("Не найдено ни одного сообщения в указанном диапазоне времени.")
+            return
 
-    prompt = chat_prompts['SUMMARIZE_PROMPT']
+        prompt = chat_prompts['SUMMARIZE_PROMPT']
+        prompt += df.to_string(index=False)
 
-    prompt += df.to_string(index=False)
+        query_llm = await get_query_llm(chat_id)
+        summary = query_llm(prompt)
+        print(summary)
+        await event.reply(summary)
 
-    query_llm = await get_query_llm(chat_id)
-    summary = query_llm(prompt)
-    await event.reply(summary)
     sender_id = event.sender_id
     if not sender_id:
         sender_id = event.message.from_id
