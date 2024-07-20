@@ -73,7 +73,7 @@ client = TelegramClient('bot_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
 # --- Google Gemini Configuration ---
-genai.configure(api_key=GOOGLE_API_KEY)
+genai.configure(api_key=GOOGLE_API_KEY,transport='rest')
 model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
 
 safety_settings = {
