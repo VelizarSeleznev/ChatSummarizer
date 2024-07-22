@@ -143,7 +143,15 @@ class CommandHandler:
             mentioned_username = command_match.group(2)
 
             # Проверяем, упоминается ли имя нашего бота или нет
-            if mentioned_username == f'@{self.bot_username}':
+            if mentioned_username:
+                if mentioned_username == f'@{self.bot_username}':
+                    if command == 'cancel':
+                        await self.cancel_command(event)
+                    elif command in self.command_callbacks:
+                        self.user_states[sender_id] = CommandState.WAITING_FOR_INPUT
+                        self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
+                        await self.command_callbacks[command](event, self.user_contexts[sender_id])
+            else:
                 if command == 'cancel':
                     await self.cancel_command(event)
                 elif command in self.command_callbacks:
@@ -294,13 +302,18 @@ async def handle_update_prompt(event, context):
         context['step'] = 'prompt_naming'
         prompts = load_chat_prompts(context['chat_id'])
         prompts = prompts.keys()
-        await event.reply(f"Enter the name of the prompt you want to update (or /cancel to abort):\n".join(
-            f"{key}\n" for key in prompts))
+        string = "\n".join(f"{key}" for key in prompts)
+        await event.reply(f"Enter the name of the prompt you want to update (or /cancel to abort):\n" + string)
     elif context['step'] == 'prompt_naming':
         prompt_name = event.message.text.strip().upper()
-        context['prompt_name'] = prompt_name
-        context['step'] = 'waiting_for_prompt'
-        await event.reply(f"Please send the new content for the prompt '{prompt_name}' (or /cancel to abort).")
+        prompts = load_chat_prompts(context['chat_id'])
+        prompts = prompts.keys()
+        if prompt_name in prompts:
+            context['prompt_name'] = prompt_name
+            context['step'] = 'waiting_for_prompt'
+            await event.reply(f"Please send the new content for the prompt '{prompt_name}' (or /cancel to abort).")
+        else:
+            await event.reply("Выберите существующий промпт")
     elif context['step'] == 'waiting_for_prompt':
         new_prompt = event.message.text
         chat_id = context['chat_id']
@@ -323,7 +336,9 @@ async def handle_update_limit(event, context):
 
     if 'step' not in context:
         context['step'] = 'limit_naming'
-        await event.reply("Enter the name of the limit you want to update (or /cancel to abort):")
+        chat_limits = load_chat_limits(context["chat_id"])
+        limits_list = "\n".join(f"- {name}: {value}" for name, value in chat_limits.items())
+        await event.reply("Enter the name of the limit you want to update (or /cancel to abort):\n" + limits_list)
     elif context['step'] == 'limit_naming':
         limit_name = event.message.text.strip().lower()
         context['limit_name'] = limit_name
@@ -506,7 +521,7 @@ async def ask_question(chat_id: int, question: str):
     if df.empty:
         return "В истории чата не найдено ни одного сообщения."
 
-    prompt = chat_prompts['ASK_PROMPT'].format(question=question)
+    prompt = f"Вопрос пользователя: {question}" + chat_prompts['ASK_PROMPT']
     data_as_string = df.to_string(index=False)
     prompt += f"\n {data_as_string}"
     query_llm = await get_query_llm(chat_id)
@@ -711,11 +726,13 @@ async def handle_ask(event, context):
         if urls:
             url = urls[0]
             try:
+                prompts = load_chat_prompts(context["chat_id"])
+                prompt = prompts["SUMMARIZE_URL_PROMPT"]
                 question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
                 if question:
-                    prompt = f"{url} \nКратко перескажи про что написано по этой ссылке и ответь на вопрос {question}"
+                    prompt = f"{url} \n" + prompt + f"\nТак же ответь на вопрос {question}"
                 else:
-                    prompt = f"{url} \nКратко перескажи про что написано по этой ссылке"
+                    prompt = f"{url} \n" + prompt
                 query_llm = await get_query_llm(chat_id)
                 summary = query_llm(prompt)
                 response = f"{summary}"
@@ -723,11 +740,11 @@ async def handle_ask(event, context):
                 response = f"Failed to fetch the content from the link: {e}"
         elif images:
             question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
+            prompts = load_chat_prompts(context["chat_id"])
+            prompt = prompts["SUMMARIZE_IMAGE_PROMPT"]
             if question:
-                question += "\n\nПроанализируй прикрепленные изображения и ответь на вопрос"
-            else:
-                question = "Проанализируй прикрепленные изображения"
-            response = query_gemini(question, images=images)
+                prompt = prompt + "\nТак же ответь на вопрос" + question
+            response = query_gemini(prompt, images=images)
 
         else:
             # Use user_info functionality if no link is found
@@ -740,18 +757,6 @@ async def handle_ask(event, context):
         question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
         if not question and not images:
             response = "Please provide a question after the /ask command or attach an image."
-        else:
-            if images:
-                if question:
-                    question += "\n\nPlease analyze the attached image(s) in your response."
-                else:
-                    question = "Please analyze the attached image(s)."
-
-            query_llm = await get_query_llm(chat_id)
-            if query_llm.__name__ == 'query_gemini':
-                response = query_gemini(question, images=images)
-            else:
-                response = query_llm(question)
 
     sender_id = event.sender_id
     if not sender_id:
@@ -1138,18 +1143,6 @@ async def generate_user_message_length_distribution(event, db, user_id):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_message_length_distribution.png')])
-
-
-# async def handle_user_info(event, context):
-#     chat_id = event.chat_id
-#     db = DBManager.get_db(chat_id)
-#
-#     response = await analyze_user(event, db)
-#     await event.reply(response)
-#     sender_id = event.sender_id
-#     if not sender_id:
-#         sender_id = event.message.from_id
-#     command_handler.reset_user_state(sender_id)
 
 
 async def get_user(event) -> db_User:
