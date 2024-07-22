@@ -17,8 +17,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import io
-from telethon.tl.types import DocumentAttributeFilename
-from telethon.tl.types import MessageMediaPhoto
+from telethon.tl.types import MessageMediaPhoto, Channel, DocumentAttributeFilename, User
 from PIL import Image
 
 import requests
@@ -121,6 +120,15 @@ class CommandState(Enum):
     WAITING_FOR_INPUT = auto()
 
 
+async def get_sender_id(event):
+    sender = await event.get_sender()
+    sender_id = sender.id
+    if event.is_group:
+        chat = await event.get_chat()
+        sender_id = chat.id
+    return int(sender_id)
+
+
 class CommandHandler:
     def __init__(self):
         self.user_states: Dict[int, CommandState] = {}
@@ -132,9 +140,7 @@ class CommandHandler:
         self.command_callbacks[command] = callback
 
     async def handle_message(self, event):
-        sender_id = event.sender_id
-        if not sender_id:
-            sender_id = event.message.from_id
+        sender_id = await get_sender_id(event)
         message = event.message
 
         command_match = re.match(r'/(\w+)(@\w+)?', message.text)
@@ -163,9 +169,7 @@ class CommandHandler:
             await self.command_callbacks[command](event, self.user_contexts[sender_id])
 
     async def cancel_command(self, event):
-        sender_id = event.sender_id
-        if not sender_id:
-            sender_id = event.message.from_id
+        sender_id = await get_sender_id(event)
         if sender_id in self.user_states:
             del self.user_states[sender_id]
         if sender_id in self.user_contexts:
@@ -289,9 +293,7 @@ def save_chat_functions(chat_id, functions):
 
 
 async def handle_update_prompt(event, context):
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -325,9 +327,7 @@ async def handle_update_prompt(event, context):
 
 
 async def handle_update_limit(event, context):
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -362,9 +362,7 @@ async def handle_update_limit(event, context):
 
 
 async def handle_update_query_llm(event, context):
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
 
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
@@ -433,16 +431,12 @@ async def list_functions(event, context):
     function_list = "Доступные функции:\n- default (встроенная)\n" + "\n".join(
         f"- {name}" for name in chat_functions if name != 'current_function')
     await event.reply(function_list)
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
 async def set_function(event, context):
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     if event.message.text == '/cancel':
         command_handler.reset_user_state(sender_id)
         await event.reply("Операция отменена.")
@@ -554,9 +548,7 @@ async def messages_by_day(event, context):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('messages_by_day.png')])
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -583,9 +575,7 @@ async def activity_by_hour(event, context):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('activity_by_hour.png')])
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -607,9 +597,7 @@ async def message_length_distribution(event, context):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('message_length_distribution.png')])
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -640,9 +628,7 @@ async def user_activity_comparison(event, context):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_comparison.png')])
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -678,9 +664,7 @@ async def word_trend(event, context):
     plt.close()
 
     await event.reply(file=buf, attributes=[DocumentAttributeFilename(f'word_trend_{word}.png')])
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -758,9 +742,7 @@ async def handle_ask(event, context):
         if not question and not images:
             response = "Please provide a question after the /ask command or attach an image."
 
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
     await event.reply(response)
@@ -855,9 +837,7 @@ async def list_prompts(event, context):
 
 Use /update_prompt to modify a prompt."""
     await event.reply(message)
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -871,9 +851,7 @@ async def list_limits(event, context):
 
 Use /update_limit to modify a limit."""
     await event.reply(message)
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -916,9 +894,7 @@ async def summarize(event, context):
         summary = query_llm(prompt)
         await event.reply(summary)
 
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -959,9 +935,7 @@ async def stats(event, context):
     stats_message += f"Total Reactions: {total_reactions}"
 
     await event.reply(stats_message)
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -976,11 +950,11 @@ async def analyze_user(event, db):
 
     # Get user from reply or username
     if replied_to:
-        user = await client.get_entity(replied_to.from_id)
-        user_id = user.id
+
+        user_id = await get_sender_id(event)
     elif username:
-        user = await client.get_entity(username)
-        user_id = user.id
+
+        user_id = await get_sender_id(event)
     else:
         return "Please provide a username or reply to a user's message."
 
@@ -1046,9 +1020,7 @@ async def handle_user_info(event, context):
     # Generate and send user activity graphs
     await send_user_activity_graphs(event, db)
 
-    sender_id = event.sender_id
-    if not sender_id:
-        sender_id = event.message.from_id
+    sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
 
@@ -1062,11 +1034,9 @@ async def send_user_activity_graphs(event, db):
 
     # Get user from reply or username
     if replied_to:
-        user = await client.get_entity(replied_to.from_id)
-        user_id = user.id
+        user_id = await get_sender_id(event)
     elif username:
-        user = await client.get_entity(username)
-        user_id = user.id
+        user_id = await get_sender_id(event)
     else:
         await event.reply("Please provide a username or reply to a user's message to generate activity graphs.")
         return
@@ -1149,22 +1119,52 @@ async def get_user(event) -> db_User:
     """Получите информацию о пользователе или канале из Telegram и сохраните ее в базе данных."""
     db = DBManager.get_db(event.chat_id)
     try:
-        # Check if the sender is a channel or a chat
-        if isinstance(event.message.to_id, PeerChannel) or isinstance(event.message.to_id, PeerChat):
-            # It's a group or channel message
-            entity = await event.get_chat()
-        else:
-            # It's a user message
+        sender = await event.get_sender()
+        if isinstance(sender, User):
             entity = await event.get_sender()
-
-        db_user = db_User(
-            id=entity.id,
-            username=entity.username,
-            first_name=getattr(entity, 'first_name', 'Канал'),
-            last_name=getattr(entity, 'last_name', None),
-            tags="bot" if getattr(entity, 'bot', False) else "",
-            avatar=None  # Загрузка аватара здесь опциональна
-        )
+            db_user = db_User(
+                id=entity.id,
+                username=entity.username,
+                first_name=getattr(entity, 'first_name', 'Канал'),
+                last_name=getattr(entity, 'last_name', None),
+                tags="bot" if getattr(entity, 'bot', False) else "",
+                avatar=None  # Загрузка аватара здесь опциональна
+            )
+        elif isinstance(sender, Channel):
+            channel_username = sender.username
+            channel_id = sender.id
+            channel_name = sender.title
+            db_user = db_User(
+                id=channel_id,
+                username=channel_username,
+                first_name=channel_name,
+                last_name=None,
+                tags="channel",
+                avatar=None  # Загрузка аватара здесь опциональна
+            )
+        elif event.is_group:
+            chat = await event.get_chat()
+            group_id = chat.id
+            group_name = chat.title
+            group_username = chat.username
+            db_user = db_User(
+                id=group_id,
+                username=group_username,
+                first_name=group_name,
+                last_name=None,
+                tags="group",
+                avatar=None  # Загрузка аватара здесь опциональна
+            )
+        else:
+            entity = await event.get_sender()
+            db_user = db_User(
+                id=entity.id,
+                username=entity.username,
+                first_name=getattr(entity, 'first_name', 'Канал'),
+                last_name=getattr(entity, 'last_name', None),
+                tags="bot" if getattr(entity, 'bot', False) else "",
+                avatar=None  # Загрузка аватара здесь опциональна
+            )
         db.insert_user(db_user)
         db.commit()
         return db_user
