@@ -34,7 +34,7 @@ load_dotenv()
 # Получите API ID, API Hash и токен бота из переменных окружения
 API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+BOT_TOKEN = os.getenv('TEST_TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
@@ -69,11 +69,13 @@ updating_users = {}
 DB_PATH = 'data.sqlite'
 
 # Создание экземпляра клиента Telegram
-client = TelegramClient('bot_session', API_ID, API_HASH).start(
+client = TelegramClient('test_bot_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
+BOT_NAME = client.get_me()
+
 # --- Google Gemini Configuration ---
-genai.configure(api_key=GOOGLE_API_KEY,transport='rest')
+genai.configure(api_key=GOOGLE_API_KEY, transport='rest')
 model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
 
 safety_settings = {
@@ -124,6 +126,7 @@ class CommandHandler:
         self.user_states: Dict[int, CommandState] = {}
         self.user_contexts: Dict[int, Any] = {}
         self.command_callbacks: Dict[str, Callable] = {}
+        self.bot_username = BOT_NAME.username
 
     def register_command(self, command: str, callback: Callable):
         self.command_callbacks[command] = callback
@@ -137,12 +140,16 @@ class CommandHandler:
         command_match = re.match(r'/(\w+)(@\w+)?', message.text)
         if command_match:
             command = command_match.group(1)
-            if command == 'cancel':
-                await self.cancel_command(event)
-            elif command in self.command_callbacks:
-                self.user_states[sender_id] = CommandState.WAITING_FOR_INPUT
-                self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
-                await self.command_callbacks[command](event, self.user_contexts[sender_id])
+            mentioned_username = command_match.group(2)
+
+            # Проверяем, упоминается ли имя нашего бота или нет
+            if mentioned_username == f'@{self.bot_username}':
+                if command == 'cancel':
+                    await self.cancel_command(event)
+                elif command in self.command_callbacks:
+                    self.user_states[sender_id] = CommandState.WAITING_FOR_INPUT
+                    self.user_contexts[sender_id] = {'command': command, 'chat_id': event.chat_id}
+                    await self.command_callbacks[command](event, self.user_contexts[sender_id])
         elif sender_id in self.user_states and self.user_states[sender_id] == CommandState.WAITING_FOR_INPUT:
             command = self.user_contexts[sender_id]['command']
             await self.command_callbacks[command](event, self.user_contexts[sender_id])
@@ -258,9 +265,9 @@ def load_chat_functions(chat_id):
             data = json.load(f)
     else:
         data = {
-            'current_function': 'claude',
+            'current_function': 'gemini',
             'claude': 'default_query_llm',
-            'gemini': 'query_gemini'
+            'gemini': 'default_query_llm'
         }
         with open(file_path, 'w') as f:
             json.dump(data, f)
@@ -285,7 +292,10 @@ async def handle_update_prompt(event, context):
 
     if 'step' not in context:
         context['step'] = 'prompt_naming'
-        await event.reply("Enter the name of the prompt you want to update (or /cancel to abort):")
+        prompts = load_chat_prompts(context['chat_id'])
+        prompts = prompts.keys()
+        await event.reply(f"Enter the name of the prompt you want to update (or /cancel to abort):\n".join(
+            f"{key}\n" for key in prompts))
     elif context['step'] == 'prompt_naming':
         prompt_name = event.message.text.strip().upper()
         context['prompt_name'] = prompt_name
@@ -721,10 +731,10 @@ async def handle_ask(event, context):
 
         else:
             # Use user_info functionality if no link is found
-            response = await get_user_info(event, db)
+            response = await analyze_user(event, db)
     elif username_match:
         # Use user_info functionality if username is mentioned
-        response = await get_user_info(event, db)
+        response = await analyze_user(event, db)
     else:
         # Use original ask functionality
         question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
@@ -877,7 +887,6 @@ async def summarize(event, context):
         prompt += f"\n{replied_to.text}"
         query_llm = await get_query_llm(chat_id)
         summary = query_llm(prompt)
-        print(summary)
         await event.reply(summary)
     else:
         if len(dates) == 2:
@@ -951,7 +960,7 @@ async def stats(event, context):
     command_handler.reset_user_state(sender_id)
 
 
-async def get_user_info(event, db):
+async def analyze_user(event, db):
     chat_id = event.chat_id
     message = event.message
     replied_to = await message.get_reply_message()
@@ -1029,12 +1038,118 @@ async def handle_user_info(event, context):
     chat_id = event.chat_id
     db = DBManager.get_db(chat_id)
 
-    response = await get_user_info(event, db)
-    await event.reply(response)
+    # Generate and send user activity graphs
+    await send_user_activity_graphs(event, db)
+
     sender_id = event.sender_id
     if not sender_id:
         sender_id = event.message.from_id
     command_handler.reset_user_state(sender_id)
+
+
+async def send_user_activity_graphs(event, db):
+    message = event.message
+    replied_to = await message.get_reply_message()
+
+    # Extract username if provided
+    username_match = re.search(r'@(\w+)', message.text)
+    username = username_match.group(1) if username_match else None
+
+    # Get user from reply or username
+    if replied_to:
+        user = await client.get_entity(replied_to.from_id)
+        user_id = user.id
+    elif username:
+        user = await client.get_entity(username)
+        user_id = user.id
+    else:
+        await event.reply("Please provide a username or reply to a user's message to generate activity graphs.")
+        return
+
+    # Generate graphs
+    await generate_user_activity_by_day(event, db, user_id)
+    await generate_user_activity_by_hour(event, db, user_id)
+    await generate_user_message_length_distribution(event, db, user_id)
+
+
+async def generate_user_activity_by_day(event, db, user_id):
+    query = f"""
+    SELECT DATE(date) as date, COUNT(*) as count
+    FROM messages
+    WHERE user_id = {user_id}
+    GROUP BY DATE(date)
+    ORDER BY date
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['date'], df['count'])
+    plt.title('User Activity by Day')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Messages')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_by_day.png')])
+
+
+async def generate_user_activity_by_hour(event, db, user_id):
+    query = f"""
+    SELECT strftime('%H', date) as hour, COUNT(*) as count
+    FROM messages
+    WHERE user_id = {user_id}
+    GROUP BY hour
+    ORDER BY hour
+    """
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x='hour', y='count', data=df)
+    plt.title('User Activity by Hour')
+    plt.xlabel('Hour')
+    plt.ylabel('Number of Messages')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_by_hour.png')])
+
+
+async def generate_user_message_length_distribution(event, db, user_id):
+    query = f"SELECT length(content) as length FROM messages WHERE user_id = {user_id}"
+    df = pd.read_sql_query(query, db.conn)
+
+    plt.figure(figsize=(12, 6))
+    sns.histplot(df['length'], kde=True)
+    plt.title('User Message Length Distribution')
+    plt.xlabel('Message Length')
+    plt.ylabel('Frequency')
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+
+    await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_message_length_distribution.png')])
+
+
+# async def handle_user_info(event, context):
+#     chat_id = event.chat_id
+#     db = DBManager.get_db(chat_id)
+#
+#     response = await analyze_user(event, db)
+#     await event.reply(response)
+#     sender_id = event.sender_id
+#     if not sender_id:
+#         sender_id = event.message.from_id
+#     command_handler.reset_user_state(sender_id)
 
 
 async def get_user(event) -> db_User:
@@ -1083,7 +1198,6 @@ def initialize_functions():
     command_handler.register_command('summarize', summarize)
     command_handler.register_command('stats', stats)
     command_handler.register_command('user_info', handle_user_info)
-    command_handler.register_command('update_prompt', handle_update_prompt)
 
 
 async def main():
