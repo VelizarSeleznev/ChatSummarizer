@@ -35,7 +35,7 @@ API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_API_KEY = ''  # os.getenv("ANTHROPIC_API_KEY")
 
 # Directory to store chat-specific LLM functions
 CHAT_FUNCTIONS_DIR = 'chat_functions'
@@ -91,10 +91,6 @@ generation_config = GenerationConfig(
     # top_p=0.95,
     # max_output_tokens=1024,
 )
-
-
-# conn = sqlite3.connect('data.sqlite')
-# cursor = conn.cursor()
 
 
 def load_text_data(filepath):
@@ -279,8 +275,8 @@ def load_chat_functions(chat_id):
     else:
         data = {
             'current_function': 'gemini',
-            'claude': 'default_query_llm',
-            'gemini': 'default_query_llm'
+            'claude': {'code': 'query_claude', 'can_process_images': False},
+            'gemini': {'code': 'query_gemini', 'can_process_images': True}
         }
         with open(file_path, 'w') as f:
             json.dump(data, f)
@@ -375,9 +371,9 @@ async def handle_update_query_llm(event, context):
         await event.reply("Please enter a name for the new function (cannot be 'default', or /cancel to abort):")
     elif context['step'] == 'naming':
         name = event.message.text.strip()
-        if name.lower() == 'default':
+        if name.lower() in ['default', 'claude', 'gemini']:
             await event.reply(
-                "'default' cannot be used as a function name. Please choose another name (or /cancel to abort):")
+                "This name cannot be used as a function name. Please choose another name (or /cancel to abort):")
             return
         context['name'] = name
         context['step'] = 'waiting_for_file'
@@ -419,10 +415,21 @@ async def update_query_llm(event, new_code, chat_id, name):
         await event.reply(f"Ошибка при тестировании новой функции: {e}")
         return
 
+    # Check if the function can process images
+    can_process_images = False
+    try:
+        test_image = Image.new('RGB', (100, 100), color='red')
+        result = temp_query_llm("Describe this image", images=[test_image])
+        if isinstance(result, str) and len(result) > 0:
+            can_process_images = True
+    except Exception as e:
+        pass
+
     chat_functions = load_chat_functions(chat_id)
-    chat_functions[name] = new_code
+    chat_functions[name] = {'code': new_code, 'can_process_images': can_process_images}
     save_chat_functions(chat_id, chat_functions)
-    await event.reply(f"Функция query_llm '{name}' успешно сохранена для этого чата!")
+    await event.reply(
+        f"Функция query_llm '{name}' успешно сохранена для этого чата! Может обрабатывать изображения: {'Да' if can_process_images else 'Нет'}")
     await change_active_function(event.chat_id, name)
 
 
@@ -446,7 +453,7 @@ async def set_function(event, context):
         context['step'] = 'selecting_function'
         chat_id = context['chat_id']
         chat_functions = load_chat_functions(chat_id)
-        function_list = "Выберите функцию для использования:\n0. default (встроенная)\n" + "\n".join(
+        function_list = "Выберите функцию для использования:\n1. default (встроенная)\n" + "\n".join(
             f"{i + 1}. {name}" for i, name in enumerate(chat_functions) if name != 'current_function')
         await event.reply(function_list + "\n\nОтветьте именем функции, которую вы хотите использовать.")
     elif context['step'] == 'selecting_function':
@@ -474,19 +481,23 @@ async def change_active_function(chat_id, function_name):
 
 async def get_query_llm(chat_id):
     chat_functions = load_chat_functions(chat_id)
-    current_function = chat_functions.get('current_function', 'claude')
+    current_function = chat_functions.get('current_function', 'default')
 
-    if current_function == 'claude':
-        return default_query_llm
+    if current_function == 'default':
+        return default_query_llm, True
+    elif current_function == 'gemini':
+        return query_gemini, True
+    elif current_function == 'claude':
+        return query_claude, False
     else:
-        function_code = chat_functions.get(current_function)
-        if function_code:
-            exec(function_code)
-            return locals()['query_llm']
+        function_data = chat_functions.get(current_function)
+        if function_data:
+            exec(function_data['code'])
+            return locals()['query_llm'], function_data['can_process_images']
         else:
             logging.warning(
-                f"Function '{current_function}' not found for chat {chat_id}. Using Claude as default.")
-            return default_query_llm
+                f"Function '{current_function}' not found for chat {chat_id}. Using Gemini as default.")
+            return default_query_llm, True
 
 
 async def get_last_messages(chat_id: int, limit: int):
@@ -519,8 +530,8 @@ async def ask_question(chat_id: int, question: str):
     prompt = f"Вопрос пользователя: {question}" + chat_prompts['ASK_PROMPT']
     data_as_string = df.to_string(index=False)
     prompt += f"\n {data_as_string}"
-    # query_llm = await get_query_llm(chat_id)
-    answer = query_gemini(prompt)
+    query_llm, _ = await get_query_llm(chat_id)
+    answer = query_llm(prompt)
     return answer
 
 
@@ -705,6 +716,8 @@ async def handle_ask(event, context):
         # If it's not a command, don't look for username
         username_match = None
 
+    query_llm, can_process_images = await get_query_llm(chat_id)
+
     if replied_to:
         # Check if the replied message contains a link
         urls = re.findall(r'(https?://\S+)', replied_to.text)
@@ -718,19 +731,19 @@ async def handle_ask(event, context):
                     prompt = f"{url} \n" + prompt + f"\nТак же ответь на вопрос {question}"
                 else:
                     prompt = f"{url} \n" + prompt
-                # query_llm = await get_query_llm(chat_id)
-                summary = query_gemini(prompt)
+                summary = query_llm(prompt)
                 response = f"{summary}"
             except requests.RequestException as e:
                 response = f"Failed to fetch the content from the link: {e}"
-        elif images:
+        elif images and can_process_images:
             question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
             prompts = load_chat_prompts(context["chat_id"])
             prompt = prompts["SUMMARIZE_IMAGE_PROMPT"]
             if question:
                 prompt = prompt + "\nТак же ответь на вопрос" + question
-            response = query_gemini(prompt, images=images)
-
+            response = query_llm(prompt, images=images)
+        elif images and not can_process_images:
+            response = "The current query_llm function cannot process images. Please switch to a function that supports image processing."
         else:
             # Use user_info functionality if no link is found
             response = await analyze_user(event, db)
@@ -746,9 +759,10 @@ async def handle_ask(event, context):
             string += ' '
         if not string and not images:
             response = "Please provide a question after the /ask command or attach an image."
+        elif images and not can_process_images:
+            response = "The current query_llm function cannot process images. Please switch to a function that supports image processing."
         else:
-            # query_llm = await get_query_llm(chat_id)
-            response = query_gemini(string)
+            response = query_llm(string, images=images if can_process_images else None)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
@@ -873,12 +887,24 @@ async def summarize(event, context):
     # Check if the message is a reply
     replied_to = await event.message.get_reply_message()
 
+    query_llm, can_process_images = await get_query_llm(chat_id)
+
     if replied_to:
-        prompt = prompts['SUMMARIZE_MESSAGE_PROMPT']
-        prompt += f"\n{replied_to.text}"
-        # query_llm = await get_query_llm(chat_id)
-        summary = query_gemini(prompt)
-        await event.reply(summary)
+        if replied_to.media and isinstance(replied_to.media, MessageMediaPhoto):
+            if can_process_images:
+                image = await replied_to.download_media(file=bytes)
+                pil_image = Image.open(io.BytesIO(image))
+                prompt = chat_prompts['SUMMARIZE_IMAGE_PROMPT']
+                summary = query_llm(prompt, images=[pil_image])
+                await event.reply(summary)
+            else:
+                await event.reply(
+                    "The current query_llm function cannot process images. Please switch to a function that supports image processing.")
+        else:
+            prompt = chat_prompts['SUMMARIZE_MESSAGE_PROMPT']
+            prompt += f"\n{replied_to.text}"
+            summary = query_llm(prompt)
+            await event.reply(summary)
     else:
         if len(dates) == 2:
             start_date = dates[0]
@@ -887,7 +913,7 @@ async def summarize(event, context):
             start_date = end_date = dates[0]
         else:
             current_date = datetime.now().date()
-            start_date = end_date = current_date
+            start_date = end_date = current_date.strftime('%Y-%m-%d')
 
         df = await get_chat_messages_between_dates(chat_id, start_date, end_date, chat_limits['summarize_limit'])
 
@@ -898,8 +924,7 @@ async def summarize(event, context):
         prompt = chat_prompts['SUMMARIZE_PROMPT']
         prompt += df.to_string(index=False)
 
-        # query_llm = await get_query_llm(chat_id)
-        summary = query_gemini(prompt)
+        summary = query_llm(prompt)
         await event.reply(summary)
 
     sender_id = await get_sender_id(event)
@@ -1019,8 +1044,8 @@ async def analyze_user(event, db):
     """
 
     # Query LLM
-    # query_llm = await get_query_llm(chat_id)
-    answer = query_gemini(prompt)
+    query_llm, _ = await get_query_llm(chat_id)
+    answer = query_llm(prompt)
 
     return answer
 
