@@ -33,7 +33,7 @@ load_dotenv()
 # Получите API ID, API Hash и токен бота из переменных окружения
 API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
-BOT_TOKEN = os.getenv('TEST_TELEGRAM_BOT_TOKEN')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
@@ -68,7 +68,7 @@ updating_users = {}
 DB_PATH = 'data.sqlite'
 
 # Создание экземпляра клиента Telegram
-client = TelegramClient('test_bot_session', API_ID, API_HASH).start(
+client = TelegramClient('bot_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
 BOT_NAME = client.get_me()
@@ -121,9 +121,10 @@ class CommandState(Enum):
 
 
 async def get_sender_id(event):
-    sender = await event.get_sender()
-    sender_id = sender.id
-    if event.is_group:
+    try:
+        sender = await event.get_sender()
+        sender_id = sender.id
+    except Exception as e:
         chat = await event.get_chat()
         sender_id = chat.id
     return int(sender_id)
@@ -518,8 +519,8 @@ async def ask_question(chat_id: int, question: str):
     prompt = f"Вопрос пользователя: {question}" + chat_prompts['ASK_PROMPT']
     data_as_string = df.to_string(index=False)
     prompt += f"\n {data_as_string}"
-    query_llm = await get_query_llm(chat_id)
-    answer = query_llm(prompt)
+    # query_llm = await get_query_llm(chat_id)
+    answer = query_gemini(prompt)
     return answer
 
 
@@ -717,8 +718,8 @@ async def handle_ask(event, context):
                     prompt = f"{url} \n" + prompt + f"\nТак же ответь на вопрос {question}"
                 else:
                     prompt = f"{url} \n" + prompt
-                query_llm = await get_query_llm(chat_id)
-                summary = query_llm(prompt)
+                # query_llm = await get_query_llm(chat_id)
+                summary = query_gemini(prompt)
                 response = f"{summary}"
             except requests.RequestException as e:
                 response = f"Failed to fetch the content from the link: {e}"
@@ -738,9 +739,16 @@ async def handle_ask(event, context):
         response = await analyze_user(event, db)
     else:
         # Use original ask functionality
-        question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
-        if not question and not images:
+        question = message.text.split()
+        string = ''
+        for word in question[1:]:
+            string += word
+            string += ' '
+        if not string and not images:
             response = "Please provide a question after the /ask command or attach an image."
+        else:
+            # query_llm = await get_query_llm(chat_id)
+            response = query_gemini(string)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
@@ -868,8 +876,8 @@ async def summarize(event, context):
     if replied_to:
         prompt = prompts['SUMMARIZE_MESSAGE_PROMPT']
         prompt += f"\n{replied_to.text}"
-        query_llm = await get_query_llm(chat_id)
-        summary = query_llm(prompt)
+        # query_llm = await get_query_llm(chat_id)
+        summary = query_gemini(prompt)
         await event.reply(summary)
     else:
         if len(dates) == 2:
@@ -890,8 +898,8 @@ async def summarize(event, context):
         prompt = chat_prompts['SUMMARIZE_PROMPT']
         prompt += df.to_string(index=False)
 
-        query_llm = await get_query_llm(chat_id)
-        summary = query_llm(prompt)
+        # query_llm = await get_query_llm(chat_id)
+        summary = query_gemini(prompt)
         await event.reply(summary)
 
     sender_id = await get_sender_id(event)
@@ -950,11 +958,15 @@ async def analyze_user(event, db):
 
     # Get user from reply or username
     if replied_to:
-
-        user_id = await get_sender_id(event)
+        try:
+            user = await client.get_entity(replied_to.from_id)
+            user_id = user.id
+        except Exception as e:
+            chat = await event.get_chat()
+            user_id = chat.id
     elif username:
-
-        user_id = await get_sender_id(event)
+        user = await client.get_entity(username)
+        user_id = user.id
     else:
         return "Please provide a username or reply to a user's message."
 
@@ -1007,8 +1019,8 @@ async def analyze_user(event, db):
     """
 
     # Query LLM
-    query_llm = await get_query_llm(chat_id)
-    answer = query_llm(prompt)
+    # query_llm = await get_query_llm(chat_id)
+    answer = query_gemini(prompt)
 
     return answer
 
@@ -1034,9 +1046,15 @@ async def send_user_activity_graphs(event, db):
 
     # Get user from reply or username
     if replied_to:
-        user_id = await get_sender_id(event)
+        try:
+            user = await client.get_entity(replied_to.from_id)
+            user_id = user.id
+        except Exception as e:
+            chat = await event.get_chat()
+            user_id = chat.id
     elif username:
-        user_id = await get_sender_id(event)
+        user = await client.get_entity(username)
+        user_id = user.id
     else:
         await event.reply("Please provide a username or reply to a user's message to generate activity graphs.")
         return
@@ -1121,13 +1139,17 @@ async def get_user(event) -> db_User:
     try:
         sender = await event.get_sender()
         if isinstance(sender, User):
-            entity = await event.get_sender()
+            user_id = sender.id
+            username = sender.username if sender.username else sender.first_name
+            first_name = sender.first_name
+            last_name = sender.last_name if sender.last_name else None
+
             db_user = db_User(
-                id=entity.id,
-                username=entity.username,
-                first_name=getattr(entity, 'first_name', 'Канал'),
-                last_name=getattr(entity, 'last_name', None),
-                tags="bot" if getattr(entity, 'bot', False) else "",
+                id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                tags="user",
                 avatar=None  # Загрузка аватара здесь опциональна
             )
         elif isinstance(sender, Channel):
