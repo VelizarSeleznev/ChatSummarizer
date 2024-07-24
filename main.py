@@ -18,6 +18,9 @@ import seaborn as sns
 import pandas as pd
 import io
 from telethon.tl.types import MessageMediaPhoto, Channel, DocumentAttributeFilename, User
+from telethon import events, types
+from telethon.tl.functions.bots import SetBotCommandsRequest
+from telethon.tl.types import BotCommand
 from PIL import Image
 
 import requests
@@ -68,7 +71,7 @@ updating_users = {}
 DB_PATH = 'data.sqlite'
 
 # Создание экземпляра клиента Telegram
-client = TelegramClient('bot_session', API_ID, API_HASH).start(
+client = TelegramClient('test_bot_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
 BOT_NAME = client.get_me()
@@ -1240,9 +1243,75 @@ def initialize_functions():
     command_handler.register_command('user_info', handle_user_info)
 
 
+async def set_bot_commands(client):
+    commands = [
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="help", description="Получить помощь"),
+        BotCommand(command="summarize", description="Суммировать сообщения чата"),
+        BotCommand(command="ask", description="Задать вопрос о чате"),
+        BotCommand(command="user_info", description="Получить информацию о пользователе"),
+        BotCommand(command="stats", description="Получить статистику чата"),
+        BotCommand(command="list_prompts", description="Список доступных подсказок"),
+        BotCommand(command="list_limits", description="Список текущих ограничений"),
+        BotCommand(command="update_prompt", description="Обновить подсказку"),
+        BotCommand(command="update_limit", description="Обновить ограничение"),
+        BotCommand(command="update_query_llm", description="Обновить функцию запроса LLM"),
+        BotCommand(command="list_functions", description="Список доступных функций"),
+        BotCommand(command="set_function", description="Установить активную функцию"),
+        BotCommand(command="messages_by_day", description="Показать график сообщений по дням"),
+        BotCommand(command="activity_by_hour", description="Показать активность по часам"),
+        BotCommand(command="message_length", description="Показать распределение длины сообщений"),
+        BotCommand(command="user_activity", description="Сравнить активность пользователей"),
+        BotCommand(command="word_trend", description="Показать тренд использования слов"),
+    ]
+
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeDefault(),
+        lang_code='ru',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeUsers(),
+        lang_code='ru',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeChats(),
+        lang_code='ru',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeChatAdmins(),
+        lang_code='ru',
+        commands=commands
+    ))
+
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeDefault(),
+        lang_code='ua',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeUsers(),
+        lang_code='ua',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeChats(),
+        lang_code='ua',
+        commands=commands
+    ))
+    await client(SetBotCommandsRequest(
+        scope=types.BotCommandScopeChatAdmins(),
+        lang_code='ua',
+        commands=commands
+    ))
+
+
 async def main():
     """Запустите бота и ждите новых сообщений."""
     initialize_functions()
+    await set_bot_commands(client)
     logging.info("Бот запущен!")
     await client.run_until_disconnected()
 
