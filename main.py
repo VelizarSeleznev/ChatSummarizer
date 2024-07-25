@@ -764,8 +764,11 @@ async def handle_ask(event, context):
             response = "Please provide a question after the /ask command or attach an image."
         elif images and not can_process_images:
             response = "The current query_llm function cannot process images. Please switch to a function that supports image processing."
-        else:
+        elif images and can_process_images:
             response = query_llm(string, images=images if can_process_images else None)
+        else:
+            # use original ask functionality
+            response = await ask_question(context[chat_id], string)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
