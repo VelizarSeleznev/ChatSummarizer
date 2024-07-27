@@ -22,6 +22,7 @@ from telethon import events, types
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand
 from PIL import Image
+import asyncio
 
 import requests
 
@@ -36,7 +37,7 @@ load_dotenv()
 # Получите API ID, API Hash и токен бота из переменных окружения
 API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+BOT_TOKEN = os.getenv('TEST_TELEGRAM_BOT_TOKEN')
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 ANTHROPIC_API_KEY = ''  # os.getenv("ANTHROPIC_API_KEY")
 
@@ -71,7 +72,7 @@ updating_users = {}
 DB_PATH = 'data.sqlite'
 
 # Создание экземпляра клиента Telegram
-client = TelegramClient('server_session', API_ID, API_HASH).start(
+client = TelegramClient('test_bot_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
 BOT_NAME = client.get_me()
@@ -192,7 +193,7 @@ def default_query_llm(prompt):
     return query_gemini(prompt)
 
 
-def query_gemini(prompt, images=None):
+async def query_gemini(prompt, images=None):
     try:
         content = [prompt]
         if images:
@@ -201,12 +202,19 @@ def query_gemini(prompt, images=None):
         response = model.generate_content(
             content,
             safety_settings=safety_settings,
-            generation_config=generation_config
+            generation_config=generation_config,
+            stream=True
         )
-        return response.text.strip()
+
+        full_response = ""
+        for chunk in response:
+            if chunk.text:
+                full_response += chunk.text
+                yield chunk.text
+
     except Exception as e:
         logging.error(f"An error occurred while querying the LLM: {e}")
-        return f"произошла ошибка {e}"
+        yield f"произошла ошибка {e}"
 
 
 def query_claude(prompt):
@@ -528,14 +536,18 @@ async def ask_question(chat_id: int, question: str):
     df = await get_last_messages(chat_id, chat_limits['ask_limit'])
 
     if df.empty:
-        return "В истории чата не найдено ни одного сообщения."
+        yield "В истории чата не найдено ни одного сообщения."
+        return
 
     prompt = f"Вопрос пользователя: {question}" + chat_prompts['ASK_PROMPT']
     data_as_string = df.to_string(index=False)
     prompt += f"\n {data_as_string}"
     query_llm, _ = await get_query_llm(chat_id)
-    answer = query_llm(prompt)
-    return answer
+
+    full_response = ''
+    async for chunk in query_llm(prompt):
+        full_response += str(chunk)
+        yield full_response
 
 
 async def messages_by_day(event, context):
@@ -734,25 +746,47 @@ async def handle_ask(event, context):
                     prompt = f"{url} \n" + prompt + f"\nТак же ответь на вопрос {question}"
                 else:
                     prompt = f"{url} \n" + prompt
-                summary = query_llm(prompt)
-                response = f"{summary}"
+                response_message = await event.reply("Генерирую ответ...")
+                full_response = ''
+                async for chunk in query_llm(prompt):
+                    await asyncio.sleep(1)
+                    if chunk:
+                        full_response += str(chunk)
+                        await response_message.edit(full_response)
+                # summary = query_llm(prompt)
+                # response = f"{summary}"
             except requests.RequestException as e:
                 response = f"Failed to fetch the content from the link: {e}"
+                await event.reply(response)
         elif images and can_process_images:
             question = re.sub(r'^/\w+(@\w+)?(\s+)?', '', message.text).strip()
             prompts = load_chat_prompts(context["chat_id"])
             prompt = prompts["SUMMARIZE_IMAGE_PROMPT"]
             if question:
                 prompt = prompt + "\nТак же ответь на вопрос" + question
-            response = query_llm(prompt, images=images)
+            response_message = await event.reply("Генерирую ответ...")
+            full_response = ''
+            async for chunk in query_llm(prompt, images=images):
+                await asyncio.sleep(1)
+                if chunk:
+                    full_response += str(chunk)
+                    await response_message.edit(full_response)
+            # response = query_llm(prompt, images=images)
         elif images and not can_process_images:
             response = "The current query_llm function cannot process images. Please switch to a function that supports image processing."
+            await event.reply(response)
         else:
             # Use user_info functionality if no link is found
-            response = await analyze_user(event, db)
+            response_message = await event.reply("Генерирую ответ...")
+            async for chunk in analyze_user(event, db):
+                await asyncio.sleep(1)
+                await response_message.edit(chunk)
     elif username_match:
         # Use user_info functionality if username is mentioned
-        response = await analyze_user(event, db)
+        response_message = await event.reply("Генерирую ответ...")
+        async for chunk in analyze_user(event, db):
+            await asyncio.sleep(1)
+            await response_message.edit(chunk)
     else:
         # Use original ask functionality
         question = message.text.split()
@@ -762,18 +796,28 @@ async def handle_ask(event, context):
             string += ' '
         if not string and not images:
             response = "Please provide a question after the /ask command or attach an image."
+            await event.reply(response)
         elif images and not can_process_images:
             response = "The current query_llm function cannot process images. Please switch to a function that supports image processing."
+            await event.reply(response)
         elif images and can_process_images:
-            response = query_llm(string, images=images if can_process_images else None)
+            response_message = await event.reply("Генерирую ответ...")
+            full_response = ''
+            async for chunk in query_llm(string, images=images if can_process_images else None):
+                await asyncio.sleep(1)
+                if chunk:
+                    full_response += str(chunk)
+                    await response_message.edit(full_response)
+            # response = query_llm(string, images=images if can_process_images else None)
         else:
             # use original ask functionality
-            response = await ask_question(event.chat_id, string)
+            response_message = await event.reply("Генерирую ответ...")
+            async for chunk in ask_question(event.chat_id, string):
+                await asyncio.sleep(1)
+                await response_message.edit(chunk)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
-
-    await event.reply(response)
 
 
 @client.on(events.NewMessage)
@@ -901,16 +945,30 @@ async def summarize(event, context):
                 image = await replied_to.download_media(file=bytes)
                 pil_image = Image.open(io.BytesIO(image))
                 prompt = chat_prompts['SUMMARIZE_IMAGE_PROMPT']
-                summary = query_llm(prompt, images=[pil_image])
-                await event.reply(summary)
+                response_message = await event.reply("Генерирую ответ...")
+                full_response = ''
+                async for chunk in query_llm(prompt):
+                    await asyncio.sleep(1)
+                    if chunk:
+                        full_response += str(chunk)
+                        await response_message.edit(full_response)
+                # summary = query_llm(prompt, images=[pil_image])
+                # await event.reply(summary)
             else:
                 await event.reply(
                     "The current query_llm function cannot process images. Please switch to a function that supports image processing.")
         else:
             prompt = chat_prompts['SUMMARIZE_MESSAGE_PROMPT']
             prompt += f"\n{replied_to.text}"
-            summary = query_llm(prompt)
-            await event.reply(summary)
+            response_message = await event.reply("Генерирую ответ...")
+            full_response = ''
+            async for chunk in query_llm(prompt):
+                await asyncio.sleep(1)
+                if chunk:
+                    full_response += str(chunk)
+                    await response_message.edit(full_response)
+            # summary = query_llm(prompt)
+            # await event.reply(summary)
     else:
         if len(dates) == 2:
             start_date = dates[0]
@@ -930,8 +988,15 @@ async def summarize(event, context):
         prompt = chat_prompts['SUMMARIZE_PROMPT']
         prompt += df.to_string(index=False)
 
-        summary = query_llm(prompt)
-        await event.reply(summary)
+        response_message = await event.reply("Генерирую ответ...")
+        full_response = ''
+        async for chunk in query_llm(prompt):
+            await asyncio.sleep(1)
+            if chunk:
+                full_response += str(chunk)
+                await response_message.edit(full_response)
+        # summary = query_llm(prompt)
+        # await event.reply(summary)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
@@ -999,7 +1064,8 @@ async def analyze_user(event, db):
         user = await client.get_entity(username)
         user_id = user.id
     else:
-        return "Please provide a username or reply to a user's message."
+        yield "Please provide a username or reply to a user's message."
+        return
 
     # Get user data from the database
     cursor = db.conn.cursor()
@@ -1007,7 +1073,8 @@ async def analyze_user(event, db):
     user_data = cursor.fetchone()
 
     if not user_data:
-        return "User not found in the database."
+        yield "User not found in the database."
+        return
 
     # Get user message count
     cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
@@ -1051,9 +1118,11 @@ async def analyze_user(event, db):
 
     # Query LLM
     query_llm, _ = await get_query_llm(chat_id)
-    answer = query_llm(prompt)
-
-    return answer
+    full_response = ''
+    async for chunk in query_llm(prompt):
+        if chunk:
+            full_response += str(chunk)
+            yield full_response
 
 
 async def handle_user_info(event, context):
