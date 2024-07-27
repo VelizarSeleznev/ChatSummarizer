@@ -71,7 +71,7 @@ updating_users = {}
 DB_PATH = 'data.sqlite'
 
 # Создание экземпляра клиента Telegram
-client = TelegramClient('test_bot_session', API_ID, API_HASH).start(
+client = TelegramClient('server_session', API_ID, API_HASH).start(
     bot_token=BOT_TOKEN)
 
 BOT_NAME = client.get_me()
@@ -768,7 +768,7 @@ async def handle_ask(event, context):
             response = query_llm(string, images=images if can_process_images else None)
         else:
             # use original ask functionality
-            response = await ask_question(context[chat_id], string)
+            response = await ask_question(event.chat_id, string)
 
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
