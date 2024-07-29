@@ -79,7 +79,9 @@ BOT_NAME = client.get_me()
 
 # --- Google Gemini Configuration ---
 genai.configure(api_key=GOOGLE_API_KEY, transport='rest')
-model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
+model = genai.GenerativeModel(
+    model_name='gemini-1.5-pro',
+    tools='code_execution')
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -569,12 +571,11 @@ async def messages_by_day(event, context):
     plt.xticks(rotation=45)
     plt.tight_layout()
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
+    plt.savefig('myplot.png')
     plt.close()
-
-    await event.reply(file=buf, attributes=[DocumentAttributeFilename('messages_by_day.png')])
+    file = await client.upload_file('myplot.png')
+    await client.send_file(chat_id, file)
+    os.remove('myplot.png')
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
@@ -596,12 +597,11 @@ async def activity_by_hour(event, context):
     plt.xlabel('Час')
     plt.ylabel('Количество сообщений')
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
+    plt.savefig('myplot.png')
     plt.close()
-
-    await event.reply(file=buf, attributes=[DocumentAttributeFilename('activity_by_hour.png')])
+    file = await client.upload_file('myplot.png')
+    await client.send_file(chat_id, file)
+    os.remove('myplot.png')
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
@@ -618,12 +618,11 @@ async def message_length_distribution(event, context):
     plt.xlabel('Длина сообщения')
     plt.ylabel('Частота')
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
+    plt.savefig('myplot.png')
     plt.close()
-
-    await event.reply(file=buf, attributes=[DocumentAttributeFilename('message_length_distribution.png')])
+    file = await client.upload_file('myplot.png')
+    await client.send_file(chat_id, file)
+    os.remove('myplot.png')
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
@@ -649,12 +648,11 @@ async def user_activity_comparison(event, context):
     plt.xticks(rotation=45)
     plt.tight_layout()
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
+    plt.savefig('myplot.png')
     plt.close()
-
-    await event.reply(file=buf, attributes=[DocumentAttributeFilename('user_activity_comparison.png')])
+    file = await client.upload_file('myplot.png')
+    await client.send_file(chat_id, file)
+    os.remove('myplot.png')
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
@@ -685,12 +683,11 @@ async def word_trend(event, context):
     plt.xticks(rotation=45)
     plt.tight_layout()
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
+    plt.savefig('myplot.png')
     plt.close()
-
-    await event.reply(file=buf, attributes=[DocumentAttributeFilename(f'word_trend_{word}.png')])
+    file = await client.upload_file('myplot.png')
+    await client.send_file(chat_id, file)
+    os.remove('myplot.png')
     sender_id = await get_sender_id(event)
     command_handler.reset_user_state(sender_id)
 
@@ -748,8 +745,10 @@ async def handle_ask(event, context):
                     prompt = f"{url} \n" + prompt
                 response_message = await event.reply("Генерирую ответ...")
                 full_response = ''
+                sender_id = await get_sender_id(event)
+                command_handler.reset_user_state(sender_id)
                 async for chunk in query_llm(prompt):
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
                     if chunk:
                         full_response += str(chunk)
                         await response_message.edit(full_response)
@@ -766,8 +765,10 @@ async def handle_ask(event, context):
                 prompt = prompt + "\nТак же ответь на вопрос" + question
             response_message = await event.reply("Генерирую ответ...")
             full_response = ''
+            sender_id = await get_sender_id(event)
+            command_handler.reset_user_state(sender_id)
             async for chunk in query_llm(prompt, images=images):
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 if chunk:
                     full_response += str(chunk)
                     await response_message.edit(full_response)
@@ -778,14 +779,18 @@ async def handle_ask(event, context):
         else:
             # Use user_info functionality if no link is found
             response_message = await event.reply("Генерирую ответ...")
+            sender_id = await get_sender_id(event)
+            command_handler.reset_user_state(sender_id)
             async for chunk in analyze_user(event, db):
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 await response_message.edit(chunk)
     elif username_match:
         # Use user_info functionality if username is mentioned
         response_message = await event.reply("Генерирую ответ...")
+        sender_id = await get_sender_id(event)
+        command_handler.reset_user_state(sender_id)
         async for chunk in analyze_user(event, db):
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
             await response_message.edit(chunk)
     else:
         # Use original ask functionality
@@ -803,8 +808,10 @@ async def handle_ask(event, context):
         elif images and can_process_images:
             response_message = await event.reply("Генерирую ответ...")
             full_response = ''
+            sender_id = await get_sender_id(event)
+            command_handler.reset_user_state(sender_id)
             async for chunk in query_llm(string, images=images if can_process_images else None):
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 if chunk:
                     full_response += str(chunk)
                     await response_message.edit(full_response)
@@ -812,8 +819,10 @@ async def handle_ask(event, context):
         else:
             # use original ask functionality
             response_message = await event.reply("Генерирую ответ...")
+            sender_id = await get_sender_id(event)
+            command_handler.reset_user_state(sender_id)
             async for chunk in ask_question(event.chat_id, string):
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 await response_message.edit(chunk)
 
     sender_id = await get_sender_id(event)
@@ -948,7 +957,7 @@ async def summarize(event, context):
                 response_message = await event.reply("Генерирую ответ...")
                 full_response = ''
                 async for chunk in query_llm(prompt):
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
                     if chunk:
                         full_response += str(chunk)
                         await response_message.edit(full_response)
@@ -962,8 +971,10 @@ async def summarize(event, context):
             prompt += f"\n{replied_to.text}"
             response_message = await event.reply("Генерирую ответ...")
             full_response = ''
+            sender_id = await get_sender_id(event)
+            command_handler.reset_user_state(sender_id)
             async for chunk in query_llm(prompt):
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
                 if chunk:
                     full_response += str(chunk)
                     await response_message.edit(full_response)
@@ -990,8 +1001,10 @@ async def summarize(event, context):
 
         response_message = await event.reply("Генерирую ответ...")
         full_response = ''
+        sender_id = await get_sender_id(event)
+        command_handler.reset_user_state(sender_id)
         async for chunk in query_llm(prompt):
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
             if chunk:
                 full_response += str(chunk)
                 await response_message.edit(full_response)
